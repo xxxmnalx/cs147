@@ -22,23 +22,67 @@ BLECharacteristic *pCharacteristic;
 
 //IMU
 LSM6DSO myIMU;
+static boolean IMUReady = false;
+
+
+//button
+#define BTN_DEBOUNCE_MS 150
+volatile uint32_t lastInterruptMs = 0;
+
+//tof
+VL53L1X tof;
+#define TOF_DISTANCE_MODE VL53L1X::Short
+static const uint32_t TIMING_BUDGET_US = 15000;
+static const uint32_t INTER_MEASUREMENT_MS = 20;
+static boolean tofReady = false;
+
+
+//display
+TFT_eSPI tft = TFT_eSPI();
+static int16_t displayW, displayH;
+
+
+
+
 
 // function declarations:
 float readMagnitude();
+void IRAM_ATTR onButtonStartPressed();
+void drawStaticLayout();
+bool initSensor();
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin();
-  Wire.setClock(400000);
   delay(100);
+  Serial.println("Starting StackSense");
 
-  if (myIMU.begin() == false) {
-    Serial.println("LSM6DSO not detected");
-    while (1);
+  tft.init();
+  tft.setRotation(1);
+#ifdef TFT_BL
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+#endif
+  displayW = tft.width();
+  displayH = tft.height();
+  drawStaticLayout();
+
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(400000);
+
+  tofReady = initSensor();
+  if (!tofReady) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("ToF not found", 6, 44, 4);
+  }
+
+  IMUReady = myIMU.begin() != false;
+  if (!IMUReady) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("IMU not found", 6, 64, 4);
   }
   myIMU.initialize(BASIC_SETTINGS);
 
-  BLEDevice::init("147final_Group9");
+  BLEDevice::init("StackSense");
   BLEServer *pServer = BLEDevice::createServer();
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
@@ -70,5 +114,35 @@ void loop() {
 float readMagnitude() {
   // Magnitude of z axes (up and down) acceleration
   float az = myIMU.readFloatAccelZ();
-  return sqrt(az * az);
+  return fabs(az);
+}
+
+void IRAM_ATTR onButtonStartPressed() {
+  uint32_t now = millis();
+  if ((now - lastInterruptMs) > BTN_DEBOUNCE_MS ){
+    //TODO
+
+    lastInterruptMs = now;
+  }
+}
+
+void drawStaticLayout() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextPadding(0);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("REPS", 6, 2, 2);
+  tft.drawRect(6, 92, displayW - 12, 12, TFT_DARKGREY);
+}
+
+bool initSensor() {
+  tof.setTimeout(500);
+  if (!tof.init()) {
+    Serial.println("VL53L1X init failed");
+    return false;
+  }
+  tof.setDistanceMode(TOF_DISTANCE_MODE);
+  tof.setMeasurementTimingBudget(TIMING_BUDGET_US);
+  tof.startContinuous(INTER_MEASUREMENT_MS);
+  return true;
 }
