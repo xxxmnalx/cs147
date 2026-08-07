@@ -29,6 +29,8 @@ static boolean IMUReady = false;
 #define BTN_DEBOUNCE_MS 150
 volatile uint32_t lastBTN1InterruptMs = 0;
 volatile uint32_t lastBTN2InterruptMs = 0;
+volatile bool startPressed = false;
+volatile bool stopPressed  = false;
 
 //tof
 VL53L1X tof;
@@ -42,8 +44,13 @@ static boolean tofReady = false;
 TFT_eSPI tft = TFT_eSPI();
 static int16_t displayW, displayH;
 
+// rep State
+enum RepState { Idle, Up, Down };
+RepState repState = Idle;
 
-
+// set State
+enum SetState { NotStarted, InProgress, Completed };
+SetState setState = NotStarted;
 
 
 // function declarations:
@@ -81,13 +88,13 @@ void setup() {
     tft.drawString("ToF not found", 6, 44, 4);
   }
 
-  IMUReady = myIMU.begin() != false;
+  IMUReady = myIMU.begin();
   if (!IMUReady) {
     tft.setTextColor(TFT_RED, TFT_BLACK);
     tft.drawString("IMU not found", 6, 64, 4);
+  } else{
+    myIMU.initialize(BASIC_SETTINGS);
   }
-  myIMU.initialize(BASIC_SETTINGS);
-
   BLEDevice::init("StackSense");
   BLEServer *pServer = BLEDevice::createServer();
   BLEService *pService = pServer->createService(SERVICE_UUID);
@@ -115,11 +122,36 @@ void setup() {
 }
 
 void loop() {
-  
+  if (!tofReady || !IMUReady) {
+    delay(500);
+    return;
+  }
+
+  unsigned long now = millis();
+
+  // button event control
+  if (startPressed) {
+    startPressed = false;
+    Serial.println("Start pressed");
+  }
+  if (stopPressed) {
+    stopPressed = false;
+    Serial.println("Stop pressed");
+  }
+
+  // read sensor data
+
+  // BLE
+
+  // real-time respond
 }
 
-// function definitions:
 
+
+
+
+
+// function definitions:
 float readMagnitude() {
   // Magnitude of z axes (up and down) acceleration
   float az = myIMU.readFloatAccelZ();
@@ -130,7 +162,6 @@ void IRAM_ATTR onButtonStartPressed() {
   uint32_t now = millis();
   if ((now - lastBTN1InterruptMs) > BTN_DEBOUNCE_MS ){
     //TODO
-
     lastBTN1InterruptMs = now;
   }
 }
@@ -139,7 +170,6 @@ void IRAM_ATTR onButtonStopPressed() {
   uint32_t now = millis();
   if ((now - lastBTN2InterruptMs) > BTN_DEBOUNCE_MS ){
     //TODO
-
     lastBTN2InterruptMs = now;
   }
 }
