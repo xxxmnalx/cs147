@@ -24,6 +24,14 @@ BLECharacteristic *pCharacteristic;
 LSM6DSO myIMU;
 static boolean IMUReady = false;
 
+//buzzer
+static int  beepsLeft = 0;
+static int  beepFreq = 0;
+static unsigned long beepPhaseUntil = 0;
+static bool beepOn = false;
+
+#define LOW_FREQ  400
+#define HIGH_FREQ 1200
 
 //button
 #define BTN_DEBOUNCE_MS 150
@@ -39,7 +47,6 @@ static const uint32_t TIMING_BUDGET_US = 15000;
 static const uint32_t INTER_MEASUREMENT_MS = 20;
 static boolean tofReady = false;
 
-
 //display
 TFT_eSPI tft = TFT_eSPI();
 static int16_t displayW, displayH;
@@ -52,6 +59,10 @@ RepState repState = Idle;
 enum SetState { NotStarted, InProgress, Completed };
 SetState setState = NotStarted;
 
+// rep data
+int repCount = 0;
+int setNumber = 0;
+
 
 // function declarations:
 float readMagnitude();
@@ -59,6 +70,10 @@ void IRAM_ATTR onButtonStartPressed();
 void IRAM_ATTR onButtonStopPressed();
 void drawStaticLayout();
 bool initSensor();
+void startSet();
+void endSet();
+void cancelSet();
+void queueBeeps(int n, int freq);
 
 void setup() {
   Serial.begin(115200);
@@ -122,7 +137,7 @@ void setup() {
 }
 
 void loop() {
-  if (!tofReady || !IMUReady) {
+  if (!tofReady) {
     delay(500);
     return;
   }
@@ -133,15 +148,31 @@ void loop() {
   if (startPressed) {
     startPressed = false;
     Serial.println("Start pressed");
+    if (setState == InProgress) {
+      // IN PROGRESS -> COMPLETED
+      endSet(); // COMPLETED -> NOT STARTED
+    } else {
+      // NOT STARTED -> IN PROGRESS
+      startSet();
+    }
   }
+
   if (stopPressed) {
     stopPressed = false;
     Serial.println("Stop pressed");
+    if (setState == InProgress) {
+      cancelSet(); // IN PROGRESS -> NOT STARTED
+    } else {
+      queueBeeps(1, LOW_FREQ);
+    }
   }
 
   // read sensor data
 
   // BLE
+  if (setState == completed){
+    payload = format
+  }
 
   // real-time respond
 }
@@ -193,4 +224,37 @@ bool initSensor() {
   tof.setMeasurementTimingBudget(TIMING_BUDGET_US);
   tof.startContinuous(INTER_MEASUREMENT_MS);
   return true;
+}
+
+void startSet() {
+  setState = InProgress;
+  repState = Idle;
+  repCount = 0;
+  Serial.printf("Set %d started\n", setNumber);
+  queueBeeps(1, HIGH_FREQ);
+}
+
+void endSet() {
+  Serial.printf("Set %d completed with %d reps\n", setNumber, repCount);
+  setState = Completed;
+  repState = Idle;
+  queueBeeps(2, HIGH_FREQ);
+  // set number increment when BLE upload completed
+
+}
+
+void cancelSet() {
+  Serial.printf("Set %d canceled with %d reps\n", setNumber, repCount);
+  setState = NotStarted;
+  repState = Idle;
+  repCount = 0;
+  queueBeeps(3, LOW_FREQ);
+
+}
+
+void queueBeeps(int n, int freq) {
+  beepsLeft = n;
+  beepFreq = freq;
+  beepOn = false;
+  beepPhaseUntil = millis();
 }
