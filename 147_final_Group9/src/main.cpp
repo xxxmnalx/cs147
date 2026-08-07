@@ -68,6 +68,23 @@ int repCount = 0;
 int setNumber = 1;
 int baselineMM = -1;
 
+int liftMM = 0;
+int velocity = 0;
+int rawDistanceMM = -1;
+int lastDistanceMM = -1;
+
+int startHeight = 0;
+int peakHeight = 0;
+int valleyHeight = 0;
+
+unsigned long timeStart = 0;
+unsigned long timeValley = 0;
+unsigned long restSince = 0;
+
+//signal
+static unsigned long lastValidMs = 0;
+static const unsigned long SENSOR_TIMEOUT_MS = 500;
+
 
 // function declarations:
 float readMagnitude();
@@ -176,10 +193,26 @@ void loop() {
   }
 
   // read sensor data
+  int distanceMM = readDistanceMM();
+  if (distanceMM > 0) {
+    rawDistanceMM = distanceMM;
+    lastValidMs = now;
+    if (setState == InProgress && baselineMM > 0){
+      //TODO collect data(lifrFromRaw(rawDistance))
+      //TODO updateStateMachine
+      Serial.printf("RAW,%lu,%d\n", now, distanceMM);
+    }
+  } else if (setState == InProgress && repState != Idle && (now - lastValidMs) > SENSOR_TIMEOUT_MS) {
+    // sensor timeout, reset rep state
+    Serial.println("Sensor timeout, resetting rep state");
+    repState = Idle;
+  }
 
   // BLE
   if (setState == Completed){ //actually transmission state
     // payload = format
+    setNumber++;
+    setState = NotStarted;
   }
 
   // real-time respond
@@ -268,6 +301,7 @@ void startSet() {
   setState = InProgress;
   repState = Idle;
   repCount = 0;
+  resetSet();
   Serial.printf("Set %d started\n", setNumber);
   queueBeeps(1, BEEP_START);
 }
@@ -342,3 +376,9 @@ int readDistanceMM() {
   }
   return (int)tof.ranging_data.range_mm;
 }
+
+void resetSet(){
+  // reset the set data to 0
+}
+
+
