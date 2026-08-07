@@ -27,7 +27,8 @@ static boolean IMUReady = false;
 
 //button
 #define BTN_DEBOUNCE_MS 150
-volatile uint32_t lastInterruptMs = 0;
+volatile uint32_t lastBTN1InterruptMs = 0;
+volatile uint32_t lastBTN2InterruptMs = 0;
 
 //tof
 VL53L1X tof;
@@ -48,6 +49,7 @@ static int16_t displayW, displayH;
 // function declarations:
 float readMagnitude();
 void IRAM_ATTR onButtonStartPressed();
+void IRAM_ATTR onButtonStopPressed();
 void drawStaticLayout();
 bool initSensor();
 
@@ -65,6 +67,10 @@ void setup() {
   displayW = tft.width();
   displayH = tft.height();
   drawStaticLayout();
+
+  pinMode(BTN_START_PIN, INPUT_PULLUP);
+  pinMode(BTN_STOP_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(400000);
@@ -103,6 +109,9 @@ void setup() {
   pAdvertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
 
+  attachInterrupt(digitalPinToInterrupt(BTN_START_PIN), onButtonStartPressed, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BTN_STOP_PIN), onButtonStopPressed, FALLING);
+
 }
 
 void loop() {
@@ -119,10 +128,19 @@ float readMagnitude() {
 
 void IRAM_ATTR onButtonStartPressed() {
   uint32_t now = millis();
-  if ((now - lastInterruptMs) > BTN_DEBOUNCE_MS ){
+  if ((now - lastBTN1InterruptMs) > BTN_DEBOUNCE_MS ){
     //TODO
 
-    lastInterruptMs = now;
+    lastBTN1InterruptMs = now;
+  }
+}
+
+void IRAM_ATTR onButtonStopPressed() {
+  uint32_t now = millis();
+  if ((now - lastBTN2InterruptMs) > BTN_DEBOUNCE_MS ){
+    //TODO
+
+    lastBTN2InterruptMs = now;
   }
 }
 
