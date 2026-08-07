@@ -25,13 +25,17 @@ LSM6DSO myIMU;
 static boolean IMUReady = false;
 
 //buzzer
+#define BEEP_REP    4000 // rep counted, brightest
+#define BEEP_START  3400 // set started
+#define BEEP_END    3400 // set ended
+#define BEEP_ERROR  2400 // cancel
+
+#define BEEP_ON_MS   150
+#define BEEP_OFF_MS  100
 static int  beepsLeft = 0;
 static int  beepFreq = 0;
 static unsigned long beepPhaseUntil = 0;
 static bool beepOn = false;
-
-#define LOW_FREQ  400
-#define HIGH_FREQ 1200
 
 //button
 #define BTN_DEBOUNCE_MS 150
@@ -61,7 +65,8 @@ SetState setState = NotStarted;
 
 // rep data
 int repCount = 0;
-int setNumber = 0;
+int setNumber = 1;
+int baselineMM = -1;
 
 
 // function declarations:
@@ -74,6 +79,9 @@ void startSet();
 void endSet();
 void cancelSet();
 void queueBeeps(int n, int freq);
+void serviceBuzzer(unsigned long now);
+int readDistanceMM();
+void finishRep();
 
 void setup() {
   Serial.begin(115200);
@@ -163,18 +171,20 @@ void loop() {
     if (setState == InProgress) {
       cancelSet(); // IN PROGRESS -> NOT STARTED
     } else {
-      queueBeeps(1, LOW_FREQ);
+      queueBeeps(1, BEEP_ERROR);
     }
   }
 
   // read sensor data
 
   // BLE
-  if (setState == completed){
-    payload = format
+  if (setState == Completed){ //actually transmission state
+    // payload = format
   }
 
   // real-time respond
+  serviceBuzzer(now);
+
 }
 
 
@@ -192,7 +202,7 @@ float readMagnitude() {
 void IRAM_ATTR onButtonStartPressed() {
   uint32_t now = millis();
   if ((now - lastBTN1InterruptMs) > BTN_DEBOUNCE_MS ){
-    //TODO
+    startPressed = true;
     lastBTN1InterruptMs = now;
   }
 }
@@ -200,7 +210,7 @@ void IRAM_ATTR onButtonStartPressed() {
 void IRAM_ATTR onButtonStopPressed() {
   uint32_t now = millis();
   if ((now - lastBTN2InterruptMs) > BTN_DEBOUNCE_MS ){
-    //TODO
+    stopPressed = true;
     lastBTN2InterruptMs = now;
   }
 }
@@ -227,18 +237,46 @@ bool initSensor() {
 }
 
 void startSet() {
+  // refresh sensor
+  tof.stopContinuous();
+  delay(10);
+  tof.startContinuous(INTER_MEASUREMENT_MS);
+  delay(80);
+
+  int maxDistance = -1;
+  int validCount = 0;
+  unsigned long deadline = millis() + 800;
+
+
+  while (millis() < deadline){
+    int distance = readDistanceMM();
+    if (distance > 0) {
+      validCount++;
+      if (distance > maxDistance) {
+        maxDistance = distance;
+      }
+    }
+  }
+
+  if (validCount < 8) {
+    Serial.println("Not enough valid distance initial readings, canceling set start");
+    queueBeeps(3, BEEP_ERROR);
+    return; // keep not started
+  }
+
+  baselineMM = maxDistance;
   setState = InProgress;
   repState = Idle;
   repCount = 0;
   Serial.printf("Set %d started\n", setNumber);
-  queueBeeps(1, HIGH_FREQ);
+  queueBeeps(1, BEEP_START);
 }
 
 void endSet() {
   Serial.printf("Set %d completed with %d reps\n", setNumber, repCount);
   setState = Completed;
   repState = Idle;
-  queueBeeps(2, HIGH_FREQ);
+  queueBeeps(2, BEEP_END);
   // set number increment when BLE upload completed
 
 }
@@ -248,8 +286,21 @@ void cancelSet() {
   setState = NotStarted;
   repState = Idle;
   repCount = 0;
-  queueBeeps(3, LOW_FREQ);
+  queueBeeps(3, BEEP_ERROR);
 
+}
+
+void finishRep() {
+  repCount++;
+
+  if (repCount % 5 == 0) {
+    queueBeeps(2, BEEP_REP + 500);
+  } else {
+    queueBeeps(1, BEEP_REP);
+  }
+
+  Serial.print("rep ");
+  Serial.print(repCount);
 }
 
 void queueBeeps(int n, int freq) {
@@ -257,4 +308,37 @@ void queueBeeps(int n, int freq) {
   beepFreq = freq;
   beepOn = false;
   beepPhaseUntil = millis();
+}
+
+void serviceBuzzer(unsigned long now) {
+  if (beepsLeft <= 0 && !beepOn) {
+    return;
+  }
+  if (now < beepPhaseUntil) {
+    return;
+  }
+  if (beepOn) {
+    noTone(BUZZER_PIN);
+    beepOn = false;
+    beepPhaseUntil = now + BEEP_OFF_MS;
+    beepsLeft--;
+  } else if (beepsLeft > 0) {
+    tone(BUZZER_PIN, beepFreq);
+    beepOn = true;
+    beepPhaseUntil = now + BEEP_ON_MS;
+  }
+}
+
+int readDistanceMM() {
+  if (!tof.dataReady()) {
+    return -1;
+  }
+  // stop and read the data
+  tof.read(false);
+
+  if (tof.ranging_data.range_status != VL53L1X::RangeValid) {
+    //invalid range, exceeding the maximum range
+    return -1;
+  }
+  return (int)tof.ranging_data.range_mm;
 }
