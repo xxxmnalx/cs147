@@ -8,6 +8,10 @@
 #include <BLEServer.h>
 #include <BLE2902.h>
 
+//DEBUG Control
+bool DEBUG = false;
+bool print = false;
+
 //pins
 #define I2C_SDA_PIN   21
 #define I2C_SCL_PIN   22
@@ -94,6 +98,18 @@ static int histCount = 0;
 static unsigned long lastValidMs = 0;
 static const unsigned long SENSOR_TIMEOUT_MS = 500;
 
+//detection thresholds
+static const int HYSTERESIS_MM  = 10;
+static const int START_MM       = 20;
+static const int RETURN_BAND_MM = 25;
+static const int MIN_ROM_MM     = 50;
+
+static const unsigned long MIN_REP_MS      = 400;
+static const unsigned long REST_CONFIRM_MS = 400;
+
+static const int VEL_MOVING = 40;   // mm/s, above 40 is moving
+static const int VEL_STILL  = 25;   // mm/s, below 25 is at rest
+
 
 // function declarations:
 float readMagnitude();
@@ -107,10 +123,12 @@ void cancelSet();
 void queueBeeps(int n, int freq);
 void serviceBuzzer(unsigned long now);
 int readDistanceMM();
-void finishRep();
 void resetSignal();
 int liftFromRaw(int rawDistance);
 void smoothSample(int rawHeight, unsigned long now);
+void finishRep(unsigned long endTime);
+void beginLift(int height, unsigned long t);
+void updateStateMachine(unsigned long now);
 
 
 void setup() {
@@ -213,7 +231,7 @@ void loop() {
     if (setState == InProgress && baselineMM > 0){
       smoothSample(liftFromRaw(distanceMM), now);
       Serial.printf("RAW,%lu,%d,%d,%d\n", now, distanceMM, liftMM, velocity);
-      //TODO updateStateMachine
+      updateStateMachine(now);
     }
   } else if (setState == InProgress && repState != Idle && (now - lastValidMs) > SENSOR_TIMEOUT_MS) {
     // sensor timeout, reset rep state
@@ -338,17 +356,24 @@ void cancelSet() {
 
 }
 
-void finishRep() {
+void finishRep(unsigned long endTime) {
+  int rom   = peakHeight - startHeight;
+  unsigned long total = endTime - timeStart;
+
+  if (rom < MIN_ROM_MM || total < MIN_REP_MS) {
+    Serial.printf("REJECT,rom=%d,total=%lu\n", rom, total);
+    return;
+  }
+
   repCount++;
 
   if (repCount % 5 == 0) {
-    queueBeeps(2, BEEP_REP + 500);
+    queueBeeps(2, BEEP_REP);
   } else {
     queueBeeps(1, BEEP_REP);
   }
 
-  Serial.print("rep ");
-  Serial.print(repCount);
+  Serial.printf("REP,%d,%d,%lu\n", repCount, rom, total);
 }
 
 void queueBeeps(int n, int freq) {
@@ -446,6 +471,13 @@ void smoothSample(int unsmoothHeight, unsigned long now) {
 
 }
 
+void beginLift(int h, unsigned long t) {
+  repState    = Up;
+  startHeight = h;
+  timeStart   = t;
+  peakHeight  = h;
+}
+
 void updateStateMachine(unsigned long now){
   if (histCount < VELOCITY_WINDOW) return;   // velocity not trustworthy yet
 
@@ -454,14 +486,50 @@ void updateStateMachine(unsigned long now){
 
   switch (repState) {
     case Idle:
-      break;
+    if (h > START_MM && v > VEL_MOVING) {
+      beginLift(0,now);
+    }
+    break;
 
     case Up:
+      if (h > peakHeight) {
+        peakHeight = h;
+      }
 
+      if (h < (peakHeight - HYSTERESIS_MM)) {
+        // stack is coming down, transition to down state
+        repState = Down;
+        timeValley = now;
+        valleyHeight = h;
+        restSince = 0;
+      }
       break;
 
     case Down:
+      if (h < valleyHeight) {
+        valleyHeight = h;
+        timeValley = now;
+      }
 
+      if((h > valleyHeight + HYSTERESIS_MM) && (v > VEL_MOVING)){
+        // stack is going up again, one rep completed
+        finishRep(timeValley);
+        beginLift(valleyHeight, timeValley);
+        break;
+      }
+
+      if ((h < START_MM + RETURN_BAND_MM) && abs(v) < VEL_STILL){
+        // stack is at rest, transition to idle state
+        if (restSince == 0) {
+          restSince = now;
+        } else if ((now - restSince) > REST_CONFIRM_MS) {
+          finishRep(timeValley);
+          repState = Idle;
+          restSince = 0;
+        }
+      } else {
+        restSince = 0;
+      }
       break;
   }
 
