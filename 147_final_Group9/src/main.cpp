@@ -81,6 +81,15 @@ unsigned long timeStart = 0;
 unsigned long timeValley = 0;
 unsigned long restSince = 0;
 
+static const int SMOOTH_N = 3;
+static const int VELOCITY_WINDOW  = 6;
+
+static int rawBuf[SMOOTH_N];
+static int smoothHeightBuf[VELOCITY_WINDOW];
+static unsigned long sampleTimeBuf[VELOCITY_WINDOW];
+static int rawCount  = 0;
+static int histCount = 0;
+
 //signal
 static unsigned long lastValidMs = 0;
 static const unsigned long SENSOR_TIMEOUT_MS = 500;
@@ -99,6 +108,10 @@ void queueBeeps(int n, int freq);
 void serviceBuzzer(unsigned long now);
 int readDistanceMM();
 void finishRep();
+void resetSignal();
+int liftFromRaw(int rawDistance);
+void smoothSample(int rawHeight, unsigned long now);
+
 
 void setup() {
   Serial.begin(115200);
@@ -198,9 +211,9 @@ void loop() {
     rawDistanceMM = distanceMM;
     lastValidMs = now;
     if (setState == InProgress && baselineMM > 0){
-      //TODO collect data(lifrFromRaw(rawDistance))
+      smoothSample(liftFromRaw(distanceMM), now);
+      Serial.printf("RAW,%lu,%d,%d,%d\n", now, distanceMM, liftMM, velocity);
       //TODO updateStateMachine
-      Serial.printf("RAW,%lu,%d\n", now, distanceMM);
     }
   } else if (setState == InProgress && repState != Idle && (now - lastValidMs) > SENSOR_TIMEOUT_MS) {
     // sensor timeout, reset rep state
@@ -211,6 +224,7 @@ void loop() {
   // BLE
   if (setState == Completed){ //actually transmission state
     // payload = format
+    // TODO
     setNumber++;
     setState = NotStarted;
   }
@@ -301,7 +315,7 @@ void startSet() {
   setState = InProgress;
   repState = Idle;
   repCount = 0;
-  resetSet();
+  resetSignal();
   Serial.printf("Set %d started\n", setNumber);
   queueBeeps(1, BEEP_START);
 }
@@ -377,8 +391,78 @@ int readDistanceMM() {
   return (int)tof.ranging_data.range_mm;
 }
 
-void resetSet(){
+void resetSignal(){
   // reset the set data to 0
+  rawCount  = 0;
+  histCount = 0;
+  liftMM    = 0;
+  velocity  = 0;
+}
+
+int liftFromRaw(int rawDistance){
+  //return relative height from baseline
+  return baselineMM - rawDistance;
 }
 
 
+void smoothSample(int unsmoothHeight, unsigned long now) {
+  // Smooth the height with a 3-sample moving average, then estimate velocity
+  // from the endpoints of a 6-sample window. The long time base keeps
+  // differentiation from amplifying sensor noise.
+  for (int i = SMOOTH_N - 1; i > 0; i--) {
+    rawBuf[i] = rawBuf[i - 1];
+  }
+  rawBuf[0] = unsmoothHeight;
+  if (rawCount < SMOOTH_N) {
+    rawCount++;
+  }
+
+    long sum = 0;
+  for (int i = 0; i < rawCount; i++) {
+    sum += rawBuf[i];
+  }
+  liftMM = (int)(sum / rawCount);
+
+  for (int i = VELOCITY_WINDOW - 1; i > 0; i--) {
+    smoothHeightBuf[i] = smoothHeightBuf[i - 1];
+    sampleTimeBuf[i] = sampleTimeBuf[i - 1];
+  }
+  smoothHeightBuf[0] = liftMM;
+  sampleTimeBuf[0] = now;
+  if (histCount < VELOCITY_WINDOW) {
+    histCount++;
+  }
+
+  if (histCount >= 2) {
+    int  oldest = histCount - 1;
+    long dt     = (long)(sampleTimeBuf[0] - sampleTimeBuf[oldest]);
+    if (dt > 0) {
+      velocity = (int)(1000L * (long)(smoothHeightBuf[0] - smoothHeightBuf[oldest]) / dt);
+    }
+  } else {
+    velocity = 0;
+  }
+
+
+}
+
+void updateStateMachine(unsigned long now){
+  if (histCount < VELOCITY_WINDOW) return;   // velocity not trustworthy yet
+
+  int h = liftMM;
+  int v = velocity;
+
+  switch (repState) {
+    case Idle:
+      break;
+
+    case Up:
+
+      break;
+
+    case Down:
+
+      break;
+  }
+
+}
