@@ -8,10 +8,6 @@
 #include <BLEServer.h>
 #include <BLE2902.h>
 
-//DEBUG Control
-bool DEBUG = false;
-bool print = false;
-
 //pins
 #define I2C_SDA_PIN   21
 #define I2C_SCL_PIN   22
@@ -27,6 +23,12 @@ BLECharacteristic *pCharacteristic;
 //IMU
 LSM6DSO myIMU;
 static boolean IMUReady = false;
+static unsigned long lastImuMs = 0;
+static float accelPeak = 0;
+static uint32_t bufferUsed = 0;
+static unsigned long lastRecordMs = 0;
+static bool bufferFull = false;
+static float restingG = 1.0f;
 
 //buzzer
 #define BEEP_REP    4000 // rep counted, brightest
@@ -74,8 +76,6 @@ int baselineMM = -1;
 
 int liftMM = 0;
 int velocity = 0;
-int rawDistanceMM = -1;
-int lastDistanceMM = -1;
 
 int startHeight = 0;
 int peakHeight = 0;
@@ -110,6 +110,17 @@ static const unsigned long REST_CONFIRM_MS = 400;
 static const int VEL_MOVING = 40;   // mm/s, above 40 is moving
 static const int VEL_STILL  = 25;   // mm/s, below 25 is at rest
 
+static const unsigned long IMU_INTERVAL_MS = 5;
+
+// One recorded sample
+struct __attribute__((packed)) Sample {
+  uint8_t dt;
+  int16_t height;
+  int16_t accel;
+};
+#define MAX_SAMPLES 8000
+static uint8_t sampleBuf[MAX_SAMPLES * sizeof(Sample)];   // 40 KB
+
 
 // function declarations:
 float readMagnitude();
@@ -129,12 +140,16 @@ void smoothSample(int rawHeight, unsigned long now);
 void finishRep(unsigned long endTime);
 void beginLift(int height, unsigned long t);
 void updateStateMachine(unsigned long now);
+void recordSample(unsigned long now, int16_t height, int16_t accelMg);
 
 
 void setup() {
   Serial.begin(115200);
   delay(100);
   Serial.println("Starting StackSense");
+
+  //DEBUG
+  Serial.printf("Sample size: %u\n", sizeof(Sample));
 
   tft.init();
   tft.setRotation(1);
@@ -190,6 +205,8 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(BTN_START_PIN), onButtonStartPressed, FALLING);
   attachInterrupt(digitalPinToInterrupt(BTN_STOP_PIN), onButtonStopPressed, FALLING);
 
+  Serial.printf("Free heap: %u bytes\n", ESP.getFreeHeap());
+
 }
 
 void loop() {
@@ -223,14 +240,26 @@ void loop() {
     }
   }
 
+  // IMU peak-hold: keep the largest magnitude since the last recorded sample
+  if (IMUReady && setState == InProgress && (now - lastImuMs >= IMU_INTERVAL_MS)) {
+    lastImuMs = now;
+    float dev = readMagnitude() - restingG;
+    if (fabsf(dev) > fabsf(accelPeak)) {
+      accelPeak = dev;
+    }
+  }
+
   // read sensor data
   int distanceMM = readDistanceMM();
   if (distanceMM > 0) {
-    rawDistanceMM = distanceMM;
     lastValidMs = now;
     if (setState == InProgress && baselineMM > 0){
-      smoothSample(liftFromRaw(distanceMM), now);
-      Serial.printf("RAW,%lu,%d,%d,%d\n", now, distanceMM, liftMM, velocity);
+      int rawLift = liftFromRaw(distanceMM);
+      smoothSample(rawLift, now);
+      //DEBUG
+      Serial.printf("RAW,%lu,%d,%d,%d,%d\n", now, distanceMM, liftMM, velocity,(int)(accelPeak * 1000.0f));
+      recordSample(now, (int16_t)rawLift, (int16_t)(accelPeak * 1000.0f));
+      accelPeak = 0;
       updateStateMachine(now);
     }
   } else if (setState == InProgress && repState != Idle && (now - lastValidMs) > SENSOR_TIMEOUT_MS) {
@@ -259,9 +288,11 @@ void loop() {
 
 // function definitions:
 float readMagnitude() {
-  // Magnitude of z axes (up and down) acceleration
+  // Magnitude of  acceleration
+  float ax = myIMU.readFloatAccelX();
+  float ay = myIMU.readFloatAccelY();
   float az = myIMU.readFloatAccelZ();
-  return fabs(az);
+  return sqrtf(ax*ax + ay*ay + az*az);
 }
 
 void IRAM_ATTR onButtonStartPressed() {
@@ -310,6 +341,8 @@ void startSet() {
 
   int maxDistance = -1;
   int validCount = 0;
+  float accelSum = 0;
+  int accelCount = 0;
   unsigned long deadline = millis() + 800;
 
 
@@ -321,6 +354,13 @@ void startSet() {
         maxDistance = distance;
       }
     }
+
+    if (IMUReady) {
+      float m = readMagnitude();
+      accelSum += m;
+      accelCount++;
+    }
+
   }
 
   if (validCount < 8) {
@@ -329,18 +369,22 @@ void startSet() {
     return; // keep not started
   }
 
+  if (accelCount > 0) {
+    restingG = accelSum / accelCount;
+  }
+
   baselineMM = maxDistance;
   setState = InProgress;
   repState = Idle;
   repCount = 0;
   resetSignal();
-  Serial.printf("Set %d started\n", setNumber);
+  Serial.printf("Set %d started, baseline=%dmm, restingG=%.3f\n", setNumber, baselineMM, restingG);
   queueBeeps(1, BEEP_START);
 }
 
 void endSet() {
   Serial.printf("Set %d completed with %d reps\n", setNumber, repCount);
-  setState = Completed;
+Serial.printf("SET,%d,%d,%lu,%d\n", setNumber, repCount, (unsigned long)(bufferUsed / sizeof(Sample)), bufferFull ? 1 : 0);  setState = Completed;
   repState = Idle;
   queueBeeps(2, BEEP_END);
   // set number increment when BLE upload completed
@@ -352,6 +396,7 @@ void cancelSet() {
   setState = NotStarted;
   repState = Idle;
   repCount = 0;
+  resetSignal();
   queueBeeps(3, BEEP_ERROR);
 
 }
@@ -422,6 +467,11 @@ void resetSignal(){
   histCount = 0;
   liftMM    = 0;
   velocity  = 0;
+
+  accelPeak    = 0;
+  bufferUsed   = 0;
+  lastRecordMs = 0;
+  bufferFull   = false;
 }
 
 int liftFromRaw(int rawDistance){
@@ -460,7 +510,7 @@ void smoothSample(int unsmoothHeight, unsigned long now) {
 
   if (histCount >= 2) {
     int  oldest = histCount - 1;
-    long dt     = (long)(sampleTimeBuf[0] - sampleTimeBuf[oldest]);
+    long dt = (long)(sampleTimeBuf[0] - sampleTimeBuf[oldest]);
     if (dt > 0) {
       velocity = (int)(1000L * (long)(smoothHeightBuf[0] - smoothHeightBuf[oldest]) / dt);
     }
@@ -487,7 +537,7 @@ void updateStateMachine(unsigned long now){
   switch (repState) {
     case Idle:
     if (h > START_MM && v > VEL_MOVING) {
-      beginLift(0,now);
+      beginLift(0,sampleTimeBuf[histCount - 1]);
     }
     break;
 
@@ -533,4 +583,19 @@ void updateStateMachine(unsigned long now){
       break;
   }
 
+}
+
+void recordSample(unsigned long now, int16_t height, int16_t accelMg) {
+  if (bufferUsed + sizeof(Sample) > sizeof(sampleBuf)) {
+    bufferFull = true;   // stop recording waveform, but keep counting reps
+    return;
+  }
+
+  unsigned long delta = (lastRecordMs == 0) ? 0 : (now - lastRecordMs);
+  if (delta > 255) delta = 255;
+  lastRecordMs = now;
+
+  Sample s = { (uint8_t)delta, height, accelMg };
+  memcpy(&sampleBuf[bufferUsed], &s, sizeof(s));
+  bufferUsed += sizeof(s);
 }
