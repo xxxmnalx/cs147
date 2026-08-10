@@ -8,6 +8,8 @@
 #include <BLEServer.h>
 #include <BLE2902.h>
 
+#include "cs147_common.h"
+
 //pins
 #define I2C_SDA_PIN   21
 #define I2C_SCL_PIN   22
@@ -19,16 +21,23 @@
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 BLECharacteristic *pCharacteristic;
+BLEServer *pServer = nullptr;
+static volatile bool bleConnected = false;
+static uint16_t bleMTU = 23;
+static uint32_t txOffset = 0;
+static uint16_t txSeq = 0;
+
+constexpr int MAX_CHUNK_BYTES = 128;
 
 //IMU
 LSM6DSO myIMU;
-static boolean IMUReady = false;
-static unsigned long lastImuMs = 0;
-static float accelPeak = 0;
-static uint32_t bufferUsed = 0;
+static boolean IMUReady           = false;
+static unsigned long lastImuMs    = 0;
+static float accelPeak            = 0;
+static uint32_t bufferUsed        = 0;
 static unsigned long lastRecordMs = 0;
-static bool bufferFull = false;
-static float restingG = 1.0f;
+static bool bufferFull            = false;
+static float restingG             = 1.0f;
 
 //buzzer
 #define BEEP_REP    4000 // rep counted, brightest
@@ -66,7 +75,7 @@ enum RepState { Idle, Up, Down };
 RepState repState = Idle;
 
 // set State
-enum SetState { NotStarted, InProgress, Completed };
+enum SetState { NotStarted, InProgress, Completed, Transmitting };
 SetState setState = NotStarted;
 
 // rep data
@@ -118,8 +127,50 @@ struct __attribute__((packed)) Sample {
   int16_t height;
   int16_t accel;
 };
+
+enum PktType : uint8_t {
+  PKT_SAMPLES     = 0x01,
+  PKT_SET_SUMMARY = 0x02,
+  PKT_TX_END      = 0x03,
+  PKT_REP         = 0x05,
+};
+
+struct __attribute__((packed)) PktHeader {
+  uint8_t  type;
+  uint16_t seq;
+  uint8_t  len;
+};
+
+struct __attribute__((packed)) SetSummary {
+  PktHeader hdr;
+  uint16_t setNumber;
+  uint16_t repCount;
+  int16_t  baselineMM;
+  uint16_t sampleCount;
+  uint32_t checksum;     // XOR-fold over sampleBuf
+};
+
 #define MAX_SAMPLES 8000
 static uint8_t sampleBuf[MAX_SAMPLES * sizeof(Sample)];   // 40 KB
+
+uint32_t bufferChecksum() {
+  uint32_t sum = 0;
+  for (uint32_t i = 0; i < bufferUsed; i++) {
+    sum = (sum << 1) ^ (sum >> 31) ^ sampleBuf[i];   // cheap rotate-xor
+  }
+  return sum;
+}
+
+
+constexpr int BLE_ATT_OVERHEAD_BYTES = 3;
+constexpr int PACKET_HEADER_BYTES    = 4;
+constexpr int SAMPLE_BYTES           = sizeof(Sample);
+
+constexpr uint32_t TX_INTERVAL_MS     = 25;
+constexpr uint32_t DISPLAY_REFRESH_MS = 100;
+
+uint32_t lastTxMs = 0;
+uint32_t lastDisplayMs = 0;
 
 
 // function declarations:
@@ -141,7 +192,24 @@ void finishRep(unsigned long endTime);
 void beginLift(int height, unsigned long t);
 void updateStateMachine(unsigned long now);
 void recordSample(unsigned long now, int16_t height, int16_t accelMg);
+int usablePayloadBytes(int mtuBytes);
+int calculateSamplesPerPacket(int payloadBytes);
+int calculatePacketBytes(int samplesPerPacket);
+int calculatePacketsRequired(uint32_t totalBytes, int packetBytes);
+void printTransmissionModel(int mtuBytes, int payloadBytes, int samplesPerPacket, int packetBytes, int packetsRequired);
+void sendNextChunk();
+void updateDisplay();
 
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *pServer) override {
+    bleConnected = true;
+  }
+  void onDisconnect(BLEServer *pServer) override {
+    bleConnected = false;
+    // Restart advertising, or the device is invisible after first disconnect.
+    BLEDevice::startAdvertising();
+  }
+};
 
 void setup() {
   Serial.begin(115200);
@@ -181,9 +249,14 @@ void setup() {
   } else{
     myIMU.initialize(BASIC_SETTINGS);
   }
+
   BLEDevice::init("StackSense");
-  BLEServer *pServer = BLEDevice::createServer();
+  BLEDevice::setMTU(517);
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new ServerCallbacks());
+
   BLEService *pService = pServer->createService(SERVICE_UUID);
+
 
   pCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_UUID,
@@ -216,6 +289,7 @@ void loop() {
   }
 
   unsigned long now = millis();
+
 
   // button event control
   if (startPressed) {
@@ -268,20 +342,39 @@ void loop() {
     repState = Idle;
   }
 
-  // BLE
-  if (setState == Completed){ //actually transmission state
-    // payload = format
-    // TODO
-    setNumber++;
-    setState = NotStarted;
+  // BLE transmission
+  if (setState == Completed && bleConnected) {
+    bleMTU = pServer->getPeerMTU(pServer->getConnId());
+
+    const int payloadBytes     = usablePayloadBytes(bleMTU);
+    const int samplesPerPacket = calculateSamplesPerPacket(payloadBytes);
+    const int packetBytes      = calculatePacketBytes(samplesPerPacket);
+    const int packetsRequired  = calculatePacketsRequired(bufferUsed, packetBytes);
+
+    printTransmissionModel(bleMTU, payloadBytes, samplesPerPacket,
+                           packetBytes, packetsRequired);
+
+    txOffset = 0;
+    txSeq = 0;
+    setState = Transmitting;
+  }
+
+  if (setState == Transmitting) {
+    if (!bleConnected) {
+      setState = Completed;      // link dropped, restart from scratch
+    } else if (cs147Every(TX_INTERVAL_MS, lastTxMs)) {
+      sendNextChunk();
+    }
+  }
+
+  if (cs147Every(DISPLAY_REFRESH_MS, lastDisplayMs)) {
+    updateDisplay();
   }
 
   // real-time respond
   serviceBuzzer(now);
 
 }
-
-
 
 
 
@@ -384,11 +477,10 @@ void startSet() {
 
 void endSet() {
   Serial.printf("Set %d completed with %d reps\n", setNumber, repCount);
-Serial.printf("SET,%d,%d,%lu,%d\n", setNumber, repCount, (unsigned long)(bufferUsed / sizeof(Sample)), bufferFull ? 1 : 0);  setState = Completed;
+  Serial.printf("SET,%d,%d,%lu,%d\n", setNumber, repCount, (unsigned long)(bufferUsed / SAMPLE_BYTES), bufferFull ? 1 : 0);
+  setState = Completed;
   repState = Idle;
   queueBeeps(2, BEEP_END);
-  // set number increment when BLE upload completed
-
 }
 
 void cancelSet() {
@@ -419,6 +511,20 @@ void finishRep(unsigned long endTime) {
   }
 
   Serial.printf("REP,%d,%d,%lu\n", repCount, rom, total);
+
+  // Live notification for the demo. If it fails or the phone is away, the
+  // waveform still ships in the batch upload after the set.
+  if (bleConnected) {
+    struct __attribute__((packed)) {
+      PktHeader hdr;
+      uint16_t repIndex;
+      uint16_t romMM;
+      uint16_t durationMS;
+    } pkt = { { PKT_REP, 0, 6 }, (uint16_t)repCount, (uint16_t)rom, (uint16_t)total };
+
+    pCharacteristic->setValue((uint8_t*)&pkt, sizeof(pkt));
+    pCharacteristic->notify();
+  }
 }
 
 void queueBeeps(int n, int freq) {
@@ -598,4 +704,149 @@ void recordSample(unsigned long now, int16_t height, int16_t accelMg) {
   Sample s = { (uint8_t)delta, height, accelMg };
   memcpy(&sampleBuf[bufferUsed], &s, sizeof(s));
   bufferUsed += sizeof(s);
+}
+
+
+int usablePayloadBytes(int mtuBytes) {
+  // Guard against getPeerMTU() returning 0 before the connection settles.
+  if (mtuBytes < 23) {
+    mtuBytes = 23;   // BLE default minimum
+  }
+
+  int payloadBytes = mtuBytes - BLE_ATT_OVERHEAD_BYTES - PACKET_HEADER_BYTES;
+
+  if (payloadBytes > MAX_CHUNK_BYTES - PACKET_HEADER_BYTES) {
+    payloadBytes = MAX_CHUNK_BYTES - PACKET_HEADER_BYTES;
+  }
+  return payloadBytes;
+}
+
+int calculateSamplesPerPacket(int payloadBytes) {
+  //from C12
+  int samplesPerPacket = payloadBytes / SAMPLE_BYTES;
+  return samplesPerPacket;
+}
+
+int calculatePacketBytes(int samplesPerPacket) {
+  //from C12
+  int packetBytes = samplesPerPacket * SAMPLE_BYTES;
+  return packetBytes;
+}
+
+int calculatePacketsRequired(uint32_t totalBytes, int packetBytes) {
+  //from C12
+  int packetsRequired = (totalBytes + packetBytes - 1) / packetBytes;
+  return packetsRequired;
+}
+
+void printTransmissionModel(int mtuBytes, int payloadBytes, int samplesPerPacket, int packetBytes, int packetsRequired) {
+  Serial.println();
+  Serial.println("---------- Transmission Model ----------");
+  Serial.print("Negotiated MTU: ");
+  Serial.print(mtuBytes);
+  Serial.println(" bytes");
+  Serial.print("Protocol overhead: ");
+  Serial.print(BLE_ATT_OVERHEAD_BYTES + PACKET_HEADER_BYTES);
+  Serial.println(" bytes");
+  Serial.print("Usable payload: ");
+  Serial.print(payloadBytes);
+  Serial.println(" bytes");
+  Serial.print("Samples per packet: ");
+  Serial.println(samplesPerPacket);
+  Serial.print("Bytes per packet: ");
+  Serial.print(packetBytes);
+  Serial.println(" bytes");
+  Serial.print("Buffered data: ");
+  Serial.print(bufferUsed);
+  Serial.println(" bytes");
+  Serial.print("Packets required: ");
+  Serial.println(packetsRequired);
+  Serial.print("Result: ");
+  Serial.println(packetsRequired == 1 ? "FITS IN ONE PACKET" : "FRAGMENTATION REQUIRED");
+}
+
+void sendNextChunk() {
+  const int packetBytes =
+      calculatePacketBytes(calculateSamplesPerPacket(usablePayloadBytes(bleMTU)));
+
+  if (txOffset >= bufferUsed) {
+    SetSummary s;
+    s.hdr = { PKT_SET_SUMMARY, txSeq, sizeof(SetSummary) - sizeof(PktHeader) };
+    s.setNumber   = setNumber;
+    s.repCount    = repCount;
+    s.baselineMM  = baselineMM;
+    s.sampleCount = bufferUsed / SAMPLE_BYTES;
+    s.checksum    = bufferChecksum();
+    pCharacteristic->setValue((uint8_t*)&s, sizeof(s));
+    pCharacteristic->notify();
+
+    delay(30);   // let the stack drain before the end marker
+
+    PktHeader endPkt = { PKT_TX_END, 0, 0 };
+    pCharacteristic->setValue((uint8_t*)&endPkt, sizeof(endPkt));
+    pCharacteristic->notify();
+
+    Serial.print("Transmission complete, fragments sent: ");
+    Serial.println(txSeq);
+
+    setNumber++;
+    setState = NotStarted;
+    resetSignal();
+    return;
+  }
+
+  int len = packetBytes;
+  if (txOffset + len > bufferUsed) {
+    len = bufferUsed - txOffset;
+  }
+
+  uint8_t pkt[MAX_CHUNK_BYTES];
+  PktHeader h = { PKT_SAMPLES, txSeq, (uint8_t)len };
+  memcpy(pkt, &h, sizeof(h));
+  memcpy(pkt + sizeof(h), &sampleBuf[txOffset], len);
+
+  pCharacteristic->setValue(pkt, sizeof(h) + len);
+  pCharacteristic->notify();
+
+  txOffset += len;
+  txSeq++;
+}
+
+void updateDisplay() {
+  static int lastDrawnCount = -1;
+  static SetState lastDrawnState = NotStarted;
+  static int lastDrawnPct = -1;
+
+  int pct = 0;
+  if (setState == Transmitting && bufferUsed > 0) {
+    pct = (int)((uint64_t)txOffset * 100 / bufferUsed);
+  }
+
+  if (repCount == lastDrawnCount && setState == lastDrawnState && pct == lastDrawnPct) {
+    return;
+  }
+  lastDrawnCount = repCount;
+  lastDrawnState = setState;
+  lastDrawnPct = pct;
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextPadding(120);
+  tft.drawNumber(repCount, 6, 24, 7);
+
+  const char* status = "IDLE";
+  if (setState == InProgress)        status = "RECORDING";
+  else if (setState == Completed)    status = "WAITING BLE";
+  else if (setState == Transmitting) status = "SENDING";
+
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.setTextPadding(displayW - 12);
+  tft.drawString(status, 6, 110, 2);
+
+  // Progress bar inside the frame drawn by drawStaticLayout()
+  const int barW = displayW - 16;
+  tft.fillRect(8, 94, barW, 8, TFT_BLACK);
+  if (pct > 0) {
+    tft.fillRect(8, 94, barW * pct / 100, 8, TFT_GREEN);
+  }
 }
