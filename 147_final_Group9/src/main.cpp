@@ -21,6 +21,7 @@
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 BLECharacteristic *pCharacteristic;
+BLE2902 *pNotifyCCCD = nullptr;
 BLEServer *pServer = nullptr;
 static volatile bool bleConnected = false;
 static uint16_t bleMTU = 23;
@@ -197,6 +198,7 @@ int calculateSamplesPerPacket(int payloadBytes);
 int calculatePacketBytes(int samplesPerPacket);
 int calculatePacketsRequired(uint32_t totalBytes, int packetBytes);
 void printTransmissionModel(int mtuBytes, int payloadBytes, int samplesPerPacket, int packetBytes, int packetsRequired);
+bool bleNotifyReady();
 void sendNextChunk();
 void updateDisplay();
 
@@ -264,7 +266,8 @@ void setup() {
       BLECharacteristic::PROPERTY_NOTIFY
   );
 
-  pCharacteristic->addDescriptor(new BLE2902());
+  pNotifyCCCD = new BLE2902();
+  pCharacteristic->addDescriptor(pNotifyCCCD);
   pCharacteristic->setValue("0");
   pService->start();
 
@@ -343,7 +346,7 @@ void loop() {
   }
 
   // BLE transmission
-  if (setState == Completed && bleConnected) {
+  if (setState == Completed && bleNotifyReady()) {
     bleMTU = pServer->getPeerMTU(pServer->getConnId());
 
     const int payloadBytes     = usablePayloadBytes(bleMTU);
@@ -360,7 +363,7 @@ void loop() {
   }
 
   if (setState == Transmitting) {
-    if (!bleConnected) {
+    if (!bleNotifyReady()) {
       setState = Completed;      // link dropped, restart from scratch
     } else if (cs147Every(TX_INTERVAL_MS, lastTxMs)) {
       sendNextChunk();
@@ -514,7 +517,7 @@ void finishRep(unsigned long endTime) {
 
   // Live notification for the demo. If it fails or the phone is away, the
   // waveform still ships in the batch upload after the set.
-  if (bleConnected) {
+  if (bleNotifyReady()) {
     struct __attribute__((packed)) {
       PktHeader hdr;
       uint16_t repIndex;
@@ -765,7 +768,18 @@ void printTransmissionModel(int mtuBytes, int payloadBytes, int samplesPerPacket
   Serial.println(packetsRequired == 1 ? "FITS IN ONE PACKET" : "FRAGMENTATION REQUIRED");
 }
 
+bool bleNotifyReady() {
+  return bleConnected &&
+         pNotifyCCCD != nullptr &&
+         pNotifyCCCD->getNotifications();
+}
+
 void sendNextChunk() {
+  if (!bleNotifyReady()) {
+    setState = Completed;
+    return;
+  }
+
   const int packetBytes =
       calculatePacketBytes(calculateSamplesPerPacket(usablePayloadBytes(bleMTU)));
 
