@@ -2,9 +2,12 @@
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <TFT_eSPI.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 #include "SparkFunLSM6DSO.h"
 
 #include "cs147_common.h"
+#include "secrets.h"
 
 //pins
 #define I2C_SDA_PIN   21
@@ -15,6 +18,7 @@
 
 //upload
 static uint32_t txOffset = 0;   // bytes uploaded so far
+static bool wifiReady = false;
 
 //IMU
 LSM6DSO myIMU;
@@ -131,6 +135,9 @@ constexpr int SAMPLE_BYTES = sizeof(Sample);
 
 constexpr uint32_t DISPLAY_REFRESH_MS = 100;
 
+constexpr uint32_t WIFI_TIMEOUT_MS   = 15000;
+constexpr uint32_t UPLOAD_TIMEOUT_MS = 10000;
+
 uint32_t lastDisplayMs = 0;
 
 
@@ -153,6 +160,8 @@ void finishRep(unsigned long endTime);
 void beginLift(int height, unsigned long t);
 void updateStateMachine(unsigned long now);
 void recordSample(unsigned long now, int16_t height, int16_t accelMg);
+void connectWiFi();
+bool uploadSet();
 void updateDisplay();
 
 void setup() {
@@ -193,6 +202,8 @@ void setup() {
   } else{
     myIMU.initialize(BASIC_SETTINGS);
   }
+
+  connectWiFi();
 
   attachInterrupt(digitalPinToInterrupt(BTN_START_PIN), onButtonStartPressed, FALLING);
   attachInterrupt(digitalPinToInterrupt(BTN_STOP_PIN), onButtonStopPressed, FALLING);
@@ -261,7 +272,23 @@ void loop() {
     repState = Idle;
   }
 
-  // TODO Phase 2: HTTP upload of the completed set
+  // HTTP upload. Without a link the set stays buffered and nothing is lost.
+  if (setState == Completed && wifiReady) {
+    setState = Transmitting;
+    txOffset = 0;
+    updateDisplay();   // show SENDING before the blocking POST
+
+    if (uploadSet()) {
+      txOffset = bufferUsed;
+      setNumber++;
+      setState = NotStarted;
+      resetSignal();
+      queueBeeps(2, BEEP_END);
+    } else {
+      setState = Completed;   // keep the buffer, the set can be retried
+      queueBeeps(3, BEEP_ERROR);
+    }
+  }
 
   if (cs147Every(DISPLAY_REFRESH_MS, lastDisplayMs)) {
     updateDisplay();
@@ -589,6 +616,59 @@ void recordSample(unsigned long now, int16_t height, int16_t accelMg) {
 }
 
 
+void connectWiFi() {
+  // Bounded wait: rep counting has to work with no hotspot around, so a
+  // failure here must not hold up the rest of setup().
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Connecting to WiFi");
+
+  unsigned long deadline = millis() + WIFI_TIMEOUT_MS;
+  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  wifiReady = (WiFi.status() == WL_CONNECTED);
+  if (wifiReady) {
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi unavailable, running offline");
+  }
+}
+
+bool uploadSet() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Upload skipped, WiFi down");
+    return false;
+  }
+
+  // Metadata rides in the query string, the waveform is the raw body.
+  char url[192];
+  snprintf(url, sizeof(url),
+           "http://%s:%d/api/upload?set=%d&reps=%d&base=%d&restg=%.3f&n=%lu&crc=%lu",
+           SERVER_HOST, SERVER_PORT, setNumber, repCount, baselineMM, restingG,
+           (unsigned long)(bufferUsed / SAMPLE_BYTES),
+           (unsigned long)bufferChecksum());
+
+  HTTPClient http;
+  http.setTimeout(UPLOAD_TIMEOUT_MS);
+  if (!http.begin(url)) {
+    Serial.println("HTTP begin failed");
+    return false;
+  }
+  http.addHeader("Content-Type", "application/octet-stream");
+
+  // POST straight out of sampleBuf, no intermediate copy.
+  int code = http.POST(sampleBuf, bufferUsed);
+  http.end();
+
+  Serial.printf("UPLOAD,%d,%lu\n", code, (unsigned long)bufferUsed);
+  return code >= 200 && code < 300;
+}
+
 void updateDisplay() {
   static int lastDrawnCount = -1;
   static SetState lastDrawnState = NotStarted;
@@ -613,7 +693,7 @@ void updateDisplay() {
 
   const char* status = "IDLE";
   if (setState == InProgress)        status = "RECORDING";
-  else if (setState == Completed)    status = "WAITING BLE";
+  else if (setState == Completed)    status = "WAITING";
   else if (setState == Transmitting) status = "SENDING";
 
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
