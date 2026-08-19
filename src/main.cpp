@@ -225,12 +225,16 @@ void loop() {
   if (startPressed) {
     startPressed = false;
     Serial.println("Start pressed");
-    if (setState == InProgress) {
+    if (setState == NotStarted) {
+      // NOT STARTED -> IN PROGRESS
+      startSet();
+    } else if (setState == InProgress) {
       // IN PROGRESS -> COMPLETED
       endSet(); // COMPLETED -> NOT STARTED
     } else {
-      // NOT STARTED -> IN PROGRESS
-      startSet();
+      // COMPLETED or TRANSMITTING: the set is still unsent, refuse to start
+      // a new one rather than discard it.
+      queueBeeps(3, BEEP_ERROR);
     }
   }
 
@@ -270,10 +274,14 @@ void loop() {
     // sensor timeout, reset rep state
     Serial.println("Sensor timeout, resetting rep state");
     repState = Idle;
+    // Discard pre-dropout samples: the moving average would otherwise blend
+    // across the gap and fabricate motion that never happened.
+    rawCount  = 0;
+    histCount = 0;
   }
 
   // HTTP upload. Without a link the set stays buffered and nothing is lost.
-  if (setState == Completed && wifiReady) {
+  if (setState == Completed && WiFi.status() == WL_CONNECTED) {
     setState = Transmitting;
     txOffset = 0;
     updateDisplay();   // show SENDING before the blocking POST
@@ -356,6 +364,7 @@ void startSet() {
   delay(80);
 
   int maxDistance = -1;
+  int secondMax = -1;
   int validCount = 0;
   float accelSum = 0;
   int accelCount = 0;
@@ -367,7 +376,10 @@ void startSet() {
     if (distance > 0) {
       validCount++;
       if (distance > maxDistance) {
+        secondMax = maxDistance;
         maxDistance = distance;
+      } else if (distance > secondMax) {
+        secondMax = distance;
       }
     }
 
@@ -389,7 +401,8 @@ void startSet() {
     restingG = accelSum / accelCount;
   }
 
-  baselineMM = maxDistance;
+  // Second largest, so a single ToF spike cannot bias the whole set.
+  baselineMM = secondMax;
   setState = InProgress;
   repState = Idle;
   repCount = 0;
@@ -399,6 +412,13 @@ void startSet() {
 }
 
 void endSet() {
+  // The set can end mid-descent, before REST_CONFIRM_MS confirms the rest.
+  // Close that rep out here or it is lost. repState is reset just below,
+  // so this cannot double-count.
+  if (repState == Down) {
+    finishRep(timeValley);
+  }
+
   Serial.printf("Set %d completed with %d reps\n", setNumber, repCount);
   Serial.printf("SET,%d,%d,%lu,%d\n", setNumber, repCount, (unsigned long)(bufferUsed / SAMPLE_BYTES), bufferFull ? 1 : 0);
   setState = Completed;
