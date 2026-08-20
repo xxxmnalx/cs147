@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSense</title>
+<style>
+  :root {
+    --ground:#EFF3F4; --surface:#FFFFFF; --sunk:#E4EAEC;
+    --ink:#0F191E; --body:#2C3D45; --muted:#5F7480;
+    --rule:#D2DCDF; --rule-soft:#E3EAEC;
+    --range:#0B6E77; --range-soft:#0B6E7722;
+    --accel:#A8432C; --accel-soft:#A8432C22;
+    --ok:#1F6B4A; --bad:#A8432C; --bad-soft:#A8432C18;
+    --mono: ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans: ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#0A1216; --surface:#111C21; --sunk:#0D171B;
+      --ink:#E6EEF1; --body:#BCCCD3; --muted:#8397A1;
+      --rule:#223238; --rule-soft:#1A272C;
+      --range:#45C2CB; --range-soft:#45C2CB26;
+      --accel:#EA8A6E; --accel-soft:#EA8A6E26;
+      --ok:#4FBF8B; --bad:#EA8A6E; --bad-soft:#EA8A6E1F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0A1216; --surface:#111C21; --sunk:#0D171B;
+    --ink:#E6EEF1; --body:#BCCCD3; --muted:#8397A1;
+    --rule:#223238; --rule-soft:#1A272C;
+    --range:#45C2CB; --range-soft:#45C2CB26;
+    --accel:#EA8A6E; --accel-soft:#EA8A6E26;
+    --ok:#4FBF8B; --bad:#EA8A6E; --bad-soft:#EA8A6E1F;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--ground); color:var(--body);
+    font-family:var(--sans); font-size:15px; line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .shell { max-width:76rem; margin:0 auto; padding:2rem 1.25rem 4rem; }
+
+  /* ---------- header ---------- */
+  header {
+    display:flex; flex-wrap:wrap; gap:1rem;
+    align-items:flex-end; justify-content:space-between; margin-bottom:1.5rem;
+  }
+  h1 {
+    font-family:var(--mono); font-size:1.5rem; font-weight:600;
+    letter-spacing:-.02em; color:var(--ink); margin:0 0 .25rem;
+  }
+  .sub { font-family:var(--mono); font-size:.75rem; color:var(--muted); margin:0; }
+  .dot { display:inline-block; width:.5em; height:.5em; border-radius:50%; margin-right:.45em; vertical-align:.05em; }
+  .dot.up { background:var(--ok); } .dot.down { background:var(--bad); }
+
+  .tools { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; }
+
+  button {
+    font-family:var(--mono); font-size:.74rem; color:var(--body);
+    background:var(--surface); border:1px solid var(--rule);
+    border-radius:3px; padding:.4rem .7rem; cursor:pointer;
+    line-height:1.4; white-space:nowrap;
+  }
+  button:hover:not(:disabled) { border-color:var(--range); color:var(--ink); }
+  button:focus-visible { outline:2px solid var(--range); outline-offset:1px; }
+  button:disabled { opacity:.4; cursor:default; }
+  button.danger:hover:not(:disabled) { border-color:var(--bad); color:var(--bad); background:var(--bad-soft); }
+  button.on { background:var(--range); border-color:var(--range); color:var(--surface); }
+
+  .seg { display:inline-flex; border:1px solid var(--rule); border-radius:3px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; }
+  .seg button + button { border-left:1px solid var(--rule); }
+
+  /* ---------- layout ---------- */
+  .grid { display:grid; grid-template-columns:23rem 1fr; gap:1.25rem; align-items:start; }
+  @media (max-width: 940px) { .grid { grid-template-columns:1fr; } }
+
+  .panel { background:var(--surface); border:1px solid var(--rule); border-radius:4px; overflow:hidden; }
+  .panel > .cap {
+    display:flex; align-items:center; justify-content:space-between; gap:.5rem;
+    font-family:var(--mono); font-size:.68rem; letter-spacing:.13em;
+    text-transform:uppercase; color:var(--muted); font-weight:500;
+    margin:0; padding:.6rem .75rem; border-bottom:1px solid var(--rule-soft);
+    background:var(--sunk); min-height:2.6rem;
+  }
+
+  /* ---------- set list ---------- */
+  .sets { list-style:none; margin:0; padding:0; max-height:34rem; overflow-y:auto; }
+  .sets li { border-bottom:1px solid var(--rule-soft); display:flex; align-items:stretch; }
+  .sets li:last-child { border-bottom:0; }
+  .sets li.sel { background:var(--sunk); }
+
+  .pick {
+    display:flex; align-items:center; padding:0 .5rem 0 .75rem;
+    border-left:3px solid transparent;
+  }
+  .sets li.cur .pick { border-left-color:var(--range); }
+  .pick input { width:.95rem; height:.95rem; accent-color:var(--range); cursor:pointer; margin:0; }
+
+  .open {
+    flex:1; text-align:left; background:none; border:0; border-radius:0;
+    padding:.65rem .75rem .65rem .25rem; font-family:var(--sans); font-size:inherit;
+  }
+  .open:hover { border-color:transparent; background:var(--sunk); }
+  .row1 {
+    display:flex; justify-content:space-between; align-items:baseline; gap:.5rem;
+    font-family:var(--mono); font-size:.84rem; color:var(--ink);
+  }
+  .row1 .reps { color:var(--range); font-weight:600; }
+  .row2 {
+    font-family:var(--mono); font-size:.67rem; color:var(--muted);
+    display:flex; gap:.7rem; margin-top:.12rem; font-variant-numeric:tabular-nums;
+  }
+
+  /* ---------- detail ---------- */
+  .meta { display:grid; grid-template-columns:repeat(auto-fit,minmax(6.6rem,1fr)); border-bottom:1px solid var(--rule-soft); }
+  .meta div { padding:.65rem .9rem; border-right:1px solid var(--rule-soft); }
+  .meta div:last-child { border-right:0; }
+  .meta dt {
+    font-family:var(--mono); font-size:.6rem; letter-spacing:.11em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .18rem;
+  }
+  .meta dd { font-family:var(--mono); font-size:.95rem; color:var(--ink); margin:0; font-variant-numeric:tabular-nums; }
+
+  .chart { padding:.9rem 1rem 1.1rem; }
+  .chart + .chart { border-top:1px solid var(--rule-soft); }
+  .chart h3 {
+    font-family:var(--mono); font-size:.69rem; letter-spacing:.09em;
+    text-transform:uppercase; font-weight:500; margin:0 0 .55rem;
+    display:flex; align-items:center; gap:.45rem; color:var(--body);
+  }
+  .swatch { width:.7rem; height:.2rem; border-radius:1px; flex:none; }
+  .chart canvas { display:block; width:100%; }
+
+  .empty { padding:3rem 1.5rem; text-align:center; color:var(--muted); font-family:var(--mono); font-size:.85rem; }
+  .empty code {
+    display:block; margin-top:.8rem; color:var(--ink); background:var(--sunk);
+    padding:.5rem .7rem; border-radius:3px; font-size:.76rem; overflow-x:auto;
+  }
+
+  /* ---------- toast ---------- */
+  #toast {
+    position:fixed; left:50%; bottom:1.75rem; transform:translateX(-50%) translateY(1rem);
+    background:var(--ink); color:var(--ground);
+    font-family:var(--mono); font-size:.76rem;
+    padding:.55rem 1rem; border-radius:3px;
+    opacity:0; pointer-events:none; transition:opacity .18s, transform .18s;
+    max-width:90vw; text-align:center;
+  }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+  @media (prefers-reduced-motion: reduce) { #toast { transition:none; } }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div>
+      <h1>StackSense</h1>
+      <p class="sub"><span id="statusDot" class="dot"></span><span id="status">…</span></p>
+    </div>
+    <div class="tools">
+      <button id="btnRefresh" type="button"></button>
+      <div class="seg">
+        <button id="btnUnitAbs" type="button"></button>
+        <button id="btnUnitPct" type="button"></button>
+      </div>
+      <div class="seg">
+        <button id="btnZh" type="button">中文</button>
+        <button id="btnEn" type="button">EN</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="panel">
+      <div class="cap">
+        <span id="capSets"></span>
+        <button id="btnDelete" class="danger" type="button" disabled></button>
+      </div>
+      <ul class="sets" id="setList"></ul>
+    </section>
+
+    <section class="panel" id="detail">
+      <div class="cap"><span id="capWave"></span></div>
+      <div class="empty" id="detailBody"></div>
+    </section>
+  </div>
+
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+'use strict';
+
+const SAMPLE_BYTES = 5;
+
+/* ------------------------------------------------------------------ i18n */
+const STR = {
+  zh: {
+    refresh:'刷新', abs:'数值', pct:'百分比',
+    sets:'组次', wave:'波形', del:'删除',
+    delN:n=>`删除 ${n} 项`,
+    loading:'加载中…', pick:'从左侧选择一组',
+    none:'还没有数据', noDb:'数据库不可用 — 上传仍会被接收和校验，但不会保存',
+    noConn:'无法连接服务器', stored:n=>`${n} 组已存储`,
+    reps:'reps', samples:'样本', dur:'时长', base:'基线', bytes:'字节',
+    hHeight:'高度 · 相对基线', hAccel:'加速度 · 偏离静止',
+    copy:'复制分析 Prompt', copied:'Prompt 已复制到剪贴板',
+    copyFail:'复制失败，请手动选择文本',
+    confirmDel:n=>`确定删除 ${n} 组数据？此操作不可撤销。`,
+    deleted:n=>`已删除 ${n} 组`, delFail:'删除失败',
+    unitMm:'mm', unitMg:'mg', unitPct:'%',
+  },
+  en: {
+    refresh:'Refresh', abs:'Values', pct:'Percent',
+    sets:'Sets', wave:'Waveform', del:'Delete',
+    delN:n=>`Delete ${n}`,
+    loading:'Loading…', pick:'Select a set on the left',
+    none:'No data yet', noDb:'Database unavailable — uploads are still received and verified, but not saved',
+    noConn:'Cannot reach the server', stored:n=>`${n} set${n===1?'':'s'} stored`,
+    reps:'reps', samples:'samples', dur:'duration', base:'baseline', bytes:'bytes',
+    hHeight:'Height · above baseline', hAccel:'Acceleration · from rest',
+    copy:'Copy analysis prompt', copied:'Prompt copied to clipboard',
+    copyFail:'Copy failed — select the text manually',
+    confirmDel:n=>`Delete ${n} set${n===1?'':'s'}? This cannot be undone.`,
+    deleted:n=>`Deleted ${n}`, delFail:'Delete failed',
+    unitMm:'mm', unitMg:'mg', unitPct:'%',
+  }
+};
+
+let lang = localStorage.getItem('ss.lang') || 'zh';
+let unit = localStorage.getItem('ss.unit') || 'abs';   // 'abs' | 'pct'
+const T = () => STR[lang];
+
+/* ------------------------------------------------------------- decoding */
+/* Mirrors SampleCodec.decode() and struct Sample: uint8 dt, int16 height,
+   int16 accel — packed, little endian. dt is a delta, so the clock is rebuilt
+   by accumulating it. */
+function decode(buffer) {
+  const dv = new DataView(buffer);
+  const n = Math.floor(buffer.byteLength / SAMPLE_BYTES);
+  const t = new Float64Array(n), h = new Int16Array(n), a = new Int16Array(n);
+  let clock = 0;
+  for (let i = 0; i < n; i++) {
+    const o = i * SAMPLE_BYTES;
+    clock += dv.getUint8(o);
+    t[i] = clock;
+    h[i] = dv.getInt16(o + 1, true);
+    a[i] = dv.getInt16(o + 3, true);
+  }
+  return { n, t, h, a };
+}
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+/* -------------------------------------------------------------- charting */
+function drawTrace(canvas, times, values, stroke, fill, opts) {
+  const zeroed = !!(opts && opts.centerOnZero);
+  const suffix = (opts && opts.unit) || '';
+  const ratio = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, hgt = 180;
+  canvas.width = w * ratio; canvas.height = hgt * ratio;
+  canvas.style.height = hgt + 'px';
+
+  const g = canvas.getContext('2d');
+  g.setTransform(ratio, 0, 0, ratio, 0, 0);
+  g.clearRect(0, 0, w, hgt);
+  if (!times.length) return;
+
+  const padL = 50, padR = 12, padT = 8, padB = 20;
+  const pw = w - padL - padR, ph = hgt - padT - padB;
+
+  const tMax = times[times.length - 1] || 1;
+
+  let lo = values[0], hi = values[0];
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] < lo) lo = values[i];
+    if (values[i] > hi) hi = values[i];
+  }
+  if (zeroed) { const m = Math.max(Math.abs(lo), Math.abs(hi)) || 1; lo = -m; hi = m; }
+  if (hi === lo) hi = lo + 1;
+
+  /* Percent mode rescales the series against its own span: a centred channel
+     runs -100..100 around zero, a one-sided channel runs 0..100. */
+  let scale = v => v, dLo = lo, dHi = hi, sfx = suffix;
+  if (unit === 'pct') {
+    if (zeroed) {
+      const m = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+      scale = v => (v / m) * 100; dLo = -100; dHi = 100;
+    } else {
+      const span = (hi - lo) || 1;
+      scale = v => ((v - lo) / span) * 100; dLo = 0; dHi = 100;
+    }
+    sfx = T().unitPct;
+  }
+
+  const vLo = unit === 'pct' ? dLo : lo;
+  const vHi = unit === 'pct' ? dHi : hi;
+  const padv = (vHi - vLo) * 0.08;
+  const yLo = vLo - padv, yHi = vHi + padv;
+
+  const X = t => padL + (t / tMax) * pw;
+  const Y = v => padT + (1 - (scale(v) - yLo) / (yHi - yLo)) * ph;
+
+  g.strokeStyle = css('--rule-soft'); g.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + (i / 4) * ph;
+    g.beginPath(); g.moveTo(padL, y); g.lineTo(padL + pw, y); g.stroke();
+  }
+
+  if (zeroed) {
+    g.strokeStyle = css('--muted'); g.setLineDash([2, 3]);
+    g.beginPath(); g.moveTo(padL, Y(0)); g.lineTo(padL + pw, Y(0)); g.stroke();
+    g.setLineDash([]);
+  }
+
+  const base = zeroed ? Y(0) : padT + ph;
+  g.beginPath(); g.moveTo(X(times[0]), Y(values[0]));
+  for (let i = 1; i < times.length; i++) g.lineTo(X(times[i]), Y(values[i]));
+  g.lineTo(X(times[times.length - 1]), base); g.lineTo(X(times[0]), base);
+  g.closePath(); g.fillStyle = fill; g.fill();
+
+  g.beginPath(); g.moveTo(X(times[0]), Y(values[0]));
+  for (let i = 1; i < times.length; i++) g.lineTo(X(times[i]), Y(values[i]));
+  g.strokeStyle = stroke; g.lineWidth = 1.4; g.lineJoin = 'round'; g.stroke();
+
+  g.fillStyle = css('--muted'); g.font = '10px ' + css('--mono');
+  g.textAlign = 'right';
+  g.fillText(Math.round(vHi) + sfx, padL - 6, padT + 8);
+  g.fillText(Math.round(vLo) + sfx, padL - 6, padT + ph);
+  g.textAlign = 'left';  g.fillText('0s', padL, hgt - 5);
+  g.textAlign = 'right'; g.fillText((tMax / 1000).toFixed(1) + 's', padL + pw, hgt - 5);
+}
+
+/* ----------------------------------------------------------- prompt text */
+/* Downsampled so the prompt stays a few KB: an LLM needs the shape, not all
+   1011 points. Peaks are preserved by taking the extreme of each bucket. */
+function downsample(times, values, target) {
+  const n = values.length;
+  if (n <= target) return Array.from(values, (v, i) => [Math.round(times[i]), v]);
+  const step = n / target, out = [];
+  for (let b = 0; b < target; b++) {
+    const s = Math.floor(b * step), e = Math.min(n, Math.floor((b + 1) * step));
+    let best = values[s], bi = s;
+    for (let i = s; i < e; i++) if (Math.abs(values[i]) > Math.abs(best)) { best = values[i]; bi = i; }
+    out.push([Math.round(times[bi]), best]);
+  }
+  return out;
+}
+
+function buildPrompt(meta, d) {
+  const secs = (d.t[d.n - 1] / 1000);
+  let hMin = d.h[0], hMax = d.h[0], aMax = 0;
+  for (let i = 0; i < d.n; i++) {
+    if (d.h[i] < hMin) hMin = d.h[i];
+    if (d.h[i] > hMax) hMax = d.h[i];
+    if (Math.abs(d.a[i]) > Math.abs(aMax)) aMax = d.a[i];
+  }
+  const hs = downsample(d.t, d.h, 90).map(p => `[${p[0]},${p[1]}]`).join(',');
+  const as = downsample(d.t, d.a, 90).map(p => `[${p[0]},${p[1]}]`).join(',');
+
+  if (lang === 'en') {
+    return `I recorded a weight-training set with a homemade sensor and want your read on the technique.
+
+HOW THE DATA WAS CAPTURED
+A time-of-flight rangefinder points at the weight stack and a 6-axis IMU sits on the frame. Height is millimetres above the resting baseline, so a rep looks like a rise and a fall. Acceleration is deviation from the resting 1 g reading, in milli-g, peak-held between range samples. Sampling is roughly 55 Hz.
+
+THIS SET
+- Reps counted by the device: ${meta.reps}
+- Duration: ${secs.toFixed(1)} s
+- Samples: ${d.n}
+- Height range: ${hMin} to ${hMax} mm
+- Largest acceleration deviation: ${aMax} mg
+- Resting gravity reference: ${meta.restingG.toFixed(3)} g (a healthy value is near 1.000)
+
+SERIES, downsampled to 90 points as [milliseconds, value]
+Height (mm): ${hs}
+Acceleration (mg): ${as}
+
+WHAT I WANT
+1. Count the reps you can see and say whether that matches the device's ${meta.reps}.
+2. For each rep, estimate range of motion and how long the lift and the lowering took.
+3. Is the tempo consistent, or is there fatigue toward the end?
+4. Anything in the acceleration trace that suggests jerking, bouncing, or the stack being dropped?
+5. One concrete thing to work on next session.
+
+Be specific and cite the numbers. Say so plainly if the data is too coarse to support a conclusion.`;
+  }
+
+  return `我用自制传感器记录了一组力量训练，想请你分析动作质量。
+
+数据是怎么来的
+一个飞行时间测距传感器对着配重片，一个六轴 IMU 装在机架上。高度是相对静止基线的毫米数，所以一个 rep 表现为一次上升加一次下降。加速度是相对静止重力读数的偏离量，单位毫 g，在两次测距之间做峰值保持。采样率约 55 Hz。
+
+这一组
+- 设备计数的 reps：${meta.reps}
+- 时长：${secs.toFixed(1)} 秒
+- 样本数：${d.n}
+- 高度范围：${hMin} 到 ${hMax} mm
+- 最大加速度偏离：${aMax} mg
+- 静止重力参考值：${meta.restingG.toFixed(3)} g（正常应接近 1.000）
+
+序列，降采样到 90 个点，格式 [毫秒, 数值]
+高度 (mm)：${hs}
+加速度 (mg)：${as}
+
+我想知道
+1. 你能数出几个 rep？和设备报的 ${meta.reps} 是否一致？
+2. 每个 rep 的行程范围是多少？上升和下降各用了多久？
+3. 节奏稳定吗？后段有没有出现疲劳迹象？
+4. 加速度曲线里有没有甩、弹、或者配重片砸下来的痕迹？
+5. 下次训练最该改进的一件具体的事。
+
+请引用具体数字。如果数据精度不足以支撑某个结论，请直接说明。`;
+}
+
+/* ----------------------------------------------------------------- state */
+let sets = [], current = null, decoded = null, picked = new Set();
+
+const $ = id => document.getElementById(id);
+const $list = $('setList'), $detail = $('detail'), $body = $('detailBody');
+
+let toastTimer;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg; el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+function setStatus(text, up) {
+  $('status').textContent = text;
+  $('statusDot').className = 'dot ' + (up ? 'up' : 'down');
+}
+
+const fmtTime = s => (!s || s === 'null') ? '—' : s.replace(/\.\d+$/, '').replace(/^\d{4}-/, '');
+
+/* --------------------------------------------------------------- chrome */
+function paintChrome() {
+  document.documentElement.lang = lang === 'zh' ? 'zh' : 'en';
+  $('btnRefresh').textContent = '↻ ' + T().refresh;
+  $('btnUnitAbs').textContent = T().abs;
+  $('btnUnitPct').textContent = T().pct;
+  $('btnUnitAbs').classList.toggle('on', unit === 'abs');
+  $('btnUnitPct').classList.toggle('on', unit === 'pct');
+  $('btnZh').classList.toggle('on', lang === 'zh');
+  $('btnEn').classList.toggle('on', lang === 'en');
+  $('capSets').textContent = T().sets;
+  $('capWave').textContent = current ? `${T().wave} · #${current}` : T().wave;
+  paintDeleteBtn();
+}
+
+function paintDeleteBtn() {
+  const b = $('btnDelete');
+  b.disabled = picked.size === 0;
+  b.textContent = picked.size ? T().delN(picked.size) : T().del;
+}
+
+/* ------------------------------------------------------------- data load */
+async function loadSets(keepSelection) {
+  let res;
+  try { res = await fetch('/api/sets'); }
+  catch (e) { setStatus(T().noConn, false); return; }
+
+  if (res.status === 503) {
+    setStatus(T().noDb, false);
+    $list.innerHTML = `<li><div class="empty">${T().noDb}</div></li>`;
+    return;
+  }
+  if (!res.ok) { setStatus('HTTP ' + res.status, false); return; }
+
+  sets = await res.json();
+  setStatus(T().stored(sets.length), true);
+  picked = new Set([...picked].filter(id => sets.some(s => s.id === id)));
+
+  if (!sets.length) {
+    $list.innerHTML = `<li><div class="empty">${T().none}<code>./tools/sim_device.py http://&lt;host&gt;:8080</code></div></li>`;
+    current = null; decoded = null;
+    $body.innerHTML = T().pick;
+    $body.className = 'empty';
+    paintChrome();
+    return;
+  }
+
+  renderList();
+  const stillThere = keepSelection && sets.some(s => s.id === current);
+  select(stillThere ? current : sets[0].id);
+}
+
+function renderList() {
+  $list.innerHTML = '';
+  sets.forEach(s => {
+    const li = document.createElement('li');
+    li.dataset.id = s.id;
+    if (picked.has(s.id)) li.classList.add('sel');
+    if (s.id === current) li.classList.add('cur');
+
+    const pick = document.createElement('label');
+    pick.className = 'pick';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = picked.has(s.id);
+    cb.setAttribute('aria-label', 'select set ' + s.id);
+    cb.addEventListener('change', () => {
+      if (cb.checked) picked.add(s.id); else picked.delete(s.id);
+      li.classList.toggle('sel', cb.checked);
+      paintDeleteBtn();
+    });
+    pick.appendChild(cb);
+
+    const open = document.createElement('button');
+    open.type = 'button'; open.className = 'open';
+    open.innerHTML =
+      `<div class="row1"><span>#${s.id}　set ${s.setNumber}</span>` +
+      `<span class="reps">${s.reps} ${T().reps}</span></div>` +
+      `<div class="row2"><span>${s.sampleCount}</span>` +
+      `<span>${(s.durationMs / 1000).toFixed(1)}s</span>` +
+      `<span>${fmtTime(s.receivedAt)}</span></div>`;
+    open.addEventListener('click', () => select(s.id));
+
+    li.append(pick, open);
+    $list.appendChild(li);
+  });
+}
+
+async function select(id) {
+  current = id;
+  [...$list.children].forEach(li => li.classList.toggle('cur', Number(li.dataset.id) === id));
+
+  const s = sets.find(x => x.id === id);
+  if (!s) return;
+
+  $body.className = 'empty';
+  $body.textContent = T().loading;
+  $('capWave').textContent = `${T().wave} · #${id}`;
+
+  let buf;
+  try {
+    const r = await fetch('/api/sets/' + id + '/waveform');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    buf = await r.arrayBuffer();
+  } catch (e) {
+    $body.textContent = e.message;
+    return;
+  }
+
+  decoded = decode(buf);
+  decoded.bytes = buf.byteLength;
+  decoded.meta = s;
+  renderDetail();
+}
+
+function renderDetail() {
+  if (!decoded) return;
+  const s = decoded.meta, d = decoded;
+
+  $body.className = '';
+  $body.innerHTML =
+    `<dl class="meta">
+      <div><dt>${T().reps}</dt><dd>${s.reps}</dd></div>
+      <div><dt>${T().samples}</dt><dd>${d.n}</dd></div>
+      <div><dt>${T().dur}</dt><dd>${(d.t[d.n - 1] / 1000).toFixed(1)}s</dd></div>
+      <div><dt>${T().base}</dt><dd>${s.baselineMm}mm</dd></div>
+      <div><dt>restingG</dt><dd>${s.restingG.toFixed(3)}</dd></div>
+      <div><dt>${T().bytes}</dt><dd>${d.bytes}</dd></div>
+     </dl>
+     <div class="chart">
+       <h3><span class="swatch" style="background:${css('--range')}"></span>${T().hHeight} ${unit === 'pct' ? T().unitPct : T().unitMm}</h3>
+       <canvas id="cH"></canvas>
+     </div>
+     <div class="chart">
+       <h3><span class="swatch" style="background:${css('--accel')}"></span>${T().hAccel} ${unit === 'pct' ? T().unitPct : T().unitMg}</h3>
+       <canvas id="cA"></canvas>
+     </div>
+     <div class="chart" style="border-top:1px solid var(--rule-soft)">
+       <button id="btnCopy" type="button">⧉ ${T().copy}</button>
+     </div>`;
+
+  $('btnCopy').addEventListener('click', copyPrompt);
+  renderCharts();
+}
+
+function renderCharts() {
+  const cH = $('cH'), cA = $('cA');
+  if (!cH || !cA || !decoded) return;
+  drawTrace(cH, decoded.t, decoded.h, css('--range'), css('--range-soft'), { unit: T().unitMm });
+  drawTrace(cA, decoded.t, decoded.a, css('--accel'), css('--accel-soft'), { unit: T().unitMg, centerOnZero: true });
+}
+
+/* ---------------------------------------------------------------- actions */
+async function copyPrompt() {
+  if (!decoded) return;
+  const text = buildPrompt(decoded.meta, decoded);
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(T().copied);
+  } catch (e) {
+    /* clipboard API needs a secure context; this page is plain HTTP over an
+       IP address, so fall back to the legacy selection copy. */
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let done = false;
+    try { done = document.execCommand('copy'); } catch (_) { done = false; }
+    document.body.removeChild(ta);
+    toast(done ? T().copied : T().copyFail);
+  }
+}
+
+async function deletePicked() {
+  const ids = [...picked];
+  if (!ids.length) return;
+  if (!confirm(T().confirmDel(ids.length))) return;
+
+  let gone = 0;
+  for (const id of ids) {
+    try {
+      const r = await fetch('/api/sets/' + id, { method: 'DELETE' });
+      if (r.ok) gone++;
+    } catch (e) { /* counted as failure below */ }
+  }
+  picked.clear();
+  toast(gone === ids.length ? T().deleted(gone) : `${T().delFail} (${gone}/${ids.length})`);
+  await loadSets(true);
+}
+
+/* ------------------------------------------------------------------ wire */
+$('btnRefresh').addEventListener('click', () => loadSets(true));
+$('btnDelete').addEventListener('click', deletePicked);
+
+$('btnUnitAbs').addEventListener('click', () => { unit = 'abs'; localStorage.setItem('ss.unit', unit); paintChrome(); renderDetail(); });
+$('btnUnitPct').addEventListener('click', () => { unit = 'pct'; localStorage.setItem('ss.unit', unit); paintChrome(); renderDetail(); });
+
+function switchLang(l) {
+  lang = l; localStorage.setItem('ss.lang', l);
+  paintChrome();
+  if (sets.length) renderList();
+  setStatus(T().stored(sets.length), true);
+  if (decoded) renderDetail(); else { $body.textContent = T().pick; }
+}
+$('btnZh').addEventListener('click', () => switchLang('zh'));
+$('btnEn').addEventListener('click', () => switchLang('en'));
+
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(renderCharts, 120);
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderCharts);
+
+paintChrome();
+$body.textContent = T().loading;
+loadSets();
+</script>
+</body>
+</html>

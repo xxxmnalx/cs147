@@ -38,8 +38,13 @@ public final class Main {
                             ctx.method(), ctx.path(), ctx.statusCode(), ctx.ip(), Math.round(ms)));
         });
 
-        app.get("/api/health", ctx -> ctx.result("ok"));
+        boolean dbReady = Db.init();
+
+        app.get("/api/health", ctx -> ctx.result(dbReady ? "ok" : "ok (no database)"));
         app.post("/api/upload", UploadHandler::handle);
+        app.get("/api/sets", QueryHandler::list);
+        app.get("/api/sets/{id}/waveform", QueryHandler::waveform);
+        app.delete("/api/sets/{id}", QueryHandler::remove);
 
         // 0.0.0.0 so the ESP32 and the EC2 security group can reach it, not just localhost.
         app.start("0.0.0.0", port);

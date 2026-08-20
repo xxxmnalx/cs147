@@ -64,16 +64,24 @@ public final class UploadHandler {
             durationMs += s.dtMs;
         }
 
-        // TODO persist to MySQL once Db is implemented.
-        log.info("set={} reps={} baseline={}mm restingG={} samples={} bytes={} span={}ms crc=0x{}",
-                setNumber, reps, baselineMM, restingG, actualSamples, body.length,
-                durationMs, Long.toHexString(actualCrc));
+        long rowId = Db.insertSet(setNumber, reps, baselineMM, restingG,
+                actualSamples, (int) durationMs, actualCrc, body);
 
+        log.info("set={} reps={} baseline={}mm restingG={} samples={} bytes={} span={}ms crc=0x{} row={}",
+                setNumber, reps, baselineMM, restingG, actualSamples, body.length,
+                durationMs, Long.toHexString(actualCrc), rowId);
+
+        // 200 even when the insert failed: the bytes arrived intact and the
+        // device has nothing useful to gain by retrying into a broken database.
+        // The `stored` flag is how the caller learns it was not persisted.
         Map<String, Object> ok = new LinkedHashMap<>();
         ok.put("status", "ok");
         ok.put("set", setNumber);
         ok.put("samples", actualSamples);
-        ok.put("stored", false);
+        ok.put("stored", rowId > 0);
+        if (rowId > 0) {
+            ok.put("id", rowId);
+        }
         ctx.status(200).json(ok);
     }
 
