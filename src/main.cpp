@@ -18,7 +18,6 @@
 
 //upload
 static uint32_t txOffset = 0;   // bytes uploaded so far
-static bool wifiReady = false;
 
 //IMU
 LSM6DSO myIMU;
@@ -137,8 +136,10 @@ constexpr uint32_t DISPLAY_REFRESH_MS = 100;
 
 constexpr uint32_t WIFI_TIMEOUT_MS   = 15000;
 constexpr uint32_t UPLOAD_TIMEOUT_MS = 10000;
+constexpr uint32_t UPLOAD_RETRY_MS   = 5000;
 
 uint32_t lastDisplayMs = 0;
+uint32_t lastUploadMs = 0;
 
 
 // function declarations:
@@ -154,6 +155,7 @@ void queueBeeps(int n, int freq);
 void serviceBuzzer(unsigned long now);
 int readDistanceMM();
 void resetSignal();
+void resetSmoothing();
 int liftFromRaw(int rawDistance);
 void smoothSample(int rawHeight, unsigned long now);
 void finishRep(unsigned long endTime);
@@ -230,7 +232,7 @@ void loop() {
       startSet();
     } else if (setState == InProgress) {
       // IN PROGRESS -> COMPLETED
-      endSet(); // COMPLETED -> NOT STARTED
+      endSet();
     } else {
       // COMPLETED or TRANSMITTING: the set is still unsent, refuse to start
       // a new one rather than discard it.
@@ -276,12 +278,13 @@ void loop() {
     repState = Idle;
     // Discard pre-dropout samples: the moving average would otherwise blend
     // across the gap and fabricate motion that never happened.
-    rawCount  = 0;
-    histCount = 0;
+    resetSmoothing();
   }
 
   // HTTP upload. Without a link the set stays buffered and nothing is lost.
-  if (setState == Completed && WiFi.status() == WL_CONNECTED) {
+  // Retries are spaced out so an unreachable server cannot pin the loop.
+  if (setState == Completed && WiFi.status() == WL_CONNECTED &&
+      (now - lastUploadMs) >= UPLOAD_RETRY_MS) {
     setState = Transmitting;
     txOffset = 0;
     updateDisplay();   // show SENDING before the blocking POST
@@ -296,6 +299,9 @@ void loop() {
       setState = Completed;   // keep the buffer, the set can be retried
       queueBeeps(3, BEEP_ERROR);
     }
+    // Stamped after the POST, not before: a timeout burns the whole budget
+    // and would otherwise leave no gap at all before the next try.
+    lastUploadMs = millis();
   }
 
   if (cs147Every(DISPLAY_REFRESH_MS, lastDisplayMs)) {
@@ -498,8 +504,7 @@ int readDistanceMM() {
 
 void resetSignal(){
   // reset the set data to 0
-  rawCount  = 0;
-  histCount = 0;
+  resetSmoothing();
   liftMM    = 0;
   velocity  = 0;
 
@@ -507,6 +512,12 @@ void resetSignal(){
   bufferUsed   = 0;
   lastRecordMs = 0;
   bufferFull   = false;
+}
+
+void resetSmoothing(){
+  // Drop the moving-average and velocity history without touching set data.
+  rawCount  = 0;
+  histCount = 0;
 }
 
 int liftFromRaw(int rawDistance){
@@ -650,8 +661,7 @@ void connectWiFi() {
   }
   Serial.println();
 
-  wifiReady = (WiFi.status() == WL_CONNECTED);
-  if (wifiReady) {
+  if (WiFi.status() == WL_CONNECTED) {
     Serial.print("WiFi connected, IP: ");
     Serial.println(WiFi.localIP());
   } else {
