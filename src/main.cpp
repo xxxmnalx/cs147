@@ -118,6 +118,11 @@ struct __attribute__((packed)) Sample {
   int16_t accel;
 };
 
+// The server decodes this stream on a fixed 5 byte stride. If alignment
+// padding ever creeps back in, every field after the first sample shifts and
+// the checksum fails with no obvious cause. Catch it at compile time.
+static_assert(sizeof(Sample) == 5, "Sample must stay packed at 5 bytes");
+
 #define MAX_SAMPLES 8000
 static uint8_t sampleBuf[MAX_SAMPLES * sizeof(Sample)];   // 40 KB
 
