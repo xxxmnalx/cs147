@@ -170,6 +170,7 @@ void startSet();
 void endSet();
 void cancelSet();
 void queueBeeps(int n, int freq);
+void silenceBuzzer();
 void serviceBuzzer(unsigned long now);
 int readDistanceMM();
 void resetSignal();
@@ -210,6 +211,7 @@ void setup() {
   pinMode(BTN_START_PIN, INPUT_PULLUP);
   pinMode(BTN_STOP_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(400000);
@@ -491,10 +493,24 @@ void finishRep(unsigned long endTime) {
 }
 
 void queueBeeps(int n, int freq) {
+  if (beepOn) {
+    // Interrupting a beep that is still sounding. Clearing the flag alone
+    // would leave the LEDC driving the pin until the next service tick.
+    silenceBuzzer();
+  }
   beepsLeft = n;
   beepFreq = freq;
   beepOn = false;
   beepPhaseUntil = millis();
+}
+
+void silenceBuzzer() {
+  noTone(BUZZER_PIN);
+  // noTone() detaches the LEDC from the pin and leaves it undriven. GPIO 25
+  // floating picks up switching noise from the panel and the radio, which the
+  // buzzer renders as a low hum. Drive it low so idle is actually silent.
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
 void serviceBuzzer(unsigned long now) {
@@ -505,7 +521,7 @@ void serviceBuzzer(unsigned long now) {
     return;
   }
   if (beepOn) {
-    noTone(BUZZER_PIN);
+    silenceBuzzer();
     beepOn = false;
     beepPhaseUntil = now + BEEP_OFF_MS;
     beepsLeft--;

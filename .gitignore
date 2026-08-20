@@ -6,3 +6,5 @@
 include/secrets.h
 server/target/
 stacksense.pem
+/logs
+server/src/main/java/.DS_Store
