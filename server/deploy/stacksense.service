@@ -1,0 +1,23 @@
+[Unit]
+Description=StackSense upload server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+# Capped heap: the free-tier instance has under 1 GB and the JVM default
+# ceiling would let this race the OOM killer.
+ExecStart=__JAVA__ -Xmx256m -jar __DIR__/app.jar
+Environment=STACKSENSE_PORT=__PORT__
+# Database credentials live here, root-only, outside the repository. The
+# leading dash keeps the service starting when the file is absent: without a
+# database the server still accepts and validates uploads, it just cannot
+# persist them.
+EnvironmentFile=-/etc/stacksense.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
