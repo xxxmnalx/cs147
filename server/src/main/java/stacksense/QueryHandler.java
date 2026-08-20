@@ -2,6 +2,8 @@ package stacksense;
 
 import io.javalin.http.Context;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Read side for the dashboard.
@@ -12,6 +14,8 @@ import java.util.List;
  * the same 5-byte-stride decode the server does.
  */
 public final class QueryHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(QueryHandler.class);
 
     private static final int DEFAULT_LIMIT = 50;
 
@@ -59,8 +63,27 @@ public final class QueryHandler {
         ctx.contentType("application/octet-stream").result(blob);
     }
 
-    /** DELETE /api/sets/{id} */
+    /**
+     * DELETE /api/sets/{id}
+     *
+     * Guarded by a shared key in the X-Admin-Key header. Deletion is the only
+     * destructive route and the dashboard is on a public domain, so this fails
+     * closed: with ADMIN_KEY unset nothing can be deleted at all.
+     */
     public static void remove(Context ctx) {
+        String expected = System.getenv("ADMIN_KEY");
+        if (expected == null || expected.isBlank()) {
+            log.warn("delete refused: ADMIN_KEY is not configured on this server");
+            ctx.status(503).json(err("deletion is disabled: no admin key configured"));
+            return;
+        }
+        String supplied = ctx.header("X-Admin-Key");
+        if (supplied == null || !constantTimeEquals(supplied, expected)) {
+            log.warn("delete refused: bad admin key from {}", ctx.ip());
+            ctx.status(401).json(err("wrong password"));
+            return;
+        }
+
         if (!Db.isReady()) {
             ctx.status(503).json(err("database not available"));
             return;
@@ -80,6 +103,13 @@ public final class QueryHandler {
         ok.put("status", "ok");
         ok.put("deleted", id);
         ctx.json(ok);
+    }
+
+    /** Compares without leaking the answer through how early it stops. */
+    private static boolean constantTimeEquals(String a, String b) {
+        byte[] x = a.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] y = b.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return java.security.MessageDigest.isEqual(x, y);
     }
 
     private static java.util.Map<String, Object> err(String reason) {

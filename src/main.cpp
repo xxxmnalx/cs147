@@ -17,7 +17,6 @@
 #define BTN_STOP_PIN  27
 
 //upload
-static uint32_t txOffset = 0;   // bytes uploaded so far
 
 //IMU
 LSM6DSO myIMU;
@@ -139,6 +138,20 @@ constexpr int SAMPLE_BYTES = sizeof(Sample);
 
 constexpr uint32_t DISPLAY_REFRESH_MS = 100;
 
+// Which of the three full-screen layouts is on the panel right now.
+enum Screen { ScreenNormal, ScreenSending, ScreenDone };
+static Screen lastScreen = ScreenNormal;
+
+// How long "COMPLETED" stays up before the panel returns to idle.
+constexpr uint32_t DONE_HOLD_MS = 2000;
+static uint32_t doneUntilMs = 0;
+
+// One dot every SEND_ANIM_MS while the upload blocks the main loop.
+constexpr uint32_t SEND_ANIM_MS = 300;
+static TaskHandle_t   sendAnimHandle = nullptr;
+static volatile bool  sendAnimRun    = false;
+static volatile bool  sendAnimIdle   = true;
+
 constexpr uint32_t WIFI_TIMEOUT_MS   = 15000;
 constexpr uint32_t UPLOAD_TIMEOUT_MS = 10000;
 constexpr uint32_t UPLOAD_RETRY_MS   = 5000;
@@ -170,6 +183,11 @@ void recordSample(unsigned long now, int16_t height, int16_t accelMg);
 void connectWiFi();
 bool uploadSet();
 void updateDisplay();
+void drawSendingScreen(int dots);
+void drawDoneScreen();
+void sendAnimTask(void *arg);
+void startSendAnimation();
+void stopSendAnimation();
 
 void setup() {
   Serial.begin(115200);
@@ -291,14 +309,20 @@ void loop() {
   if (setState == Completed && WiFi.status() == WL_CONNECTED &&
       (now - lastUploadMs) >= UPLOAD_RETRY_MS) {
     setState = Transmitting;
-    txOffset = 0;
-    updateDisplay();   // show SENDING before the blocking POST
+    updateDisplay();       // hand the panel over to the sending screen
+    startSendAnimation();  // dots keep moving while the POST blocks this task
 
-    if (uploadSet()) {
-      txOffset = bufferUsed;
+    bool sent = uploadSet();
+    stopSendAnimation();   // reclaim the panel before painting the result
+
+    if (sent) {
       setNumber++;
+      // resetSignal() clears the waveform but not the tally, and startSet()
+      // is too late: the idle screen would still show the shipped set's count.
+      repCount = 0;
       setState = NotStarted;
       resetSignal();
+      doneUntilMs = millis() + DONE_HOLD_MS;
       queueBeeps(2, BEEP_END);
     } else {
       setState = Completed;   // keep the buffer, the set can be retried
@@ -352,7 +376,6 @@ void drawStaticLayout() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.drawString("REPS", 6, 2, 2);
-  tft.drawRect(6, 92, displayW - 12, 12, TFT_DARKGREY);
 }
 
 bool initSensor() {
@@ -704,27 +727,125 @@ bool uploadSet() {
   return code >= 200 && code < 300;
 }
 
+void drawSendingScreen(int dots) {
+  // Nothing else on the panel: the device is busy and this is the only thing
+  // worth saying. Padding to the full width erases the previous dot count.
+  char label[16];
+  snprintf(label, sizeof(label), "SENDING%.*s", dots, "...");
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextPadding(displayW);
+  tft.drawString(label, displayW / 2, displayH / 2, 4);
+}
+
+void drawDoneScreen() {
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextPadding(displayW);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("COMPLETED", displayW / 2, displayH / 2 - 16, 4);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("Ready 4 Next Sets", displayW / 2, displayH / 2 + 16, 2);
+}
+
+void sendAnimTask(void *arg) {
+  int dots = 1;
+  while (sendAnimRun) {
+    drawSendingScreen(dots);
+    dots = (dots % 3) + 1;
+    // Wakes early when stopSendAnimation() signals, so the result screen is
+    // not held back by a frame that is still counting down.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(SEND_ANIM_MS));
+  }
+  sendAnimHandle = nullptr;
+  sendAnimIdle = true;
+  vTaskDelete(nullptr);
+}
+
+void startSendAnimation() {
+  if (!sendAnimIdle) {
+    return;
+  }
+  sendAnimRun = true;
+  sendAnimIdle = false;
+  // Pinned to the core the main loop runs on. That task is parked inside the
+  // POST for the whole window, so the panel has exactly one writer either way.
+  xTaskCreatePinnedToCore(sendAnimTask, "sendAnim", 4096, nullptr, 1, &sendAnimHandle, 1);
+}
+
+void stopSendAnimation() {
+  sendAnimRun = false;
+  TaskHandle_t handle = sendAnimHandle;
+  if (handle != nullptr) {
+    xTaskNotifyGive(handle);
+  }
+  // Wait for the task to let go of the panel, but never hang on it.
+  uint32_t guard = millis() + 1000;
+  while (!sendAnimIdle && millis() < guard) {
+    delay(5);
+  }
+}
+
 void updateDisplay() {
   static int lastDrawnCount = -1;
+  static int lastDrawnSet = -1;
   static SetState lastDrawnState = NotStarted;
-  static int lastDrawnPct = -1;
 
-  int pct = 0;
-  if (setState == Transmitting && bufferUsed > 0) {
-    pct = (int)((uint64_t)txOffset * 100 / bufferUsed);
+  // Starting a new set cuts the completion screen short.
+  if (doneUntilMs != 0 && setState != NotStarted) {
+    doneUntilMs = 0;
   }
 
-  if (repCount == lastDrawnCount && setState == lastDrawnState && pct == lastDrawnPct) {
+  Screen want = ScreenNormal;
+  if (setState == Transmitting) {
+    want = ScreenSending;
+  } else if (doneUntilMs != 0) {
+    if (millis() < doneUntilMs) {
+      want = ScreenDone;
+    } else {
+      doneUntilMs = 0;
+    }
+  }
+
+  if (want != lastScreen) {
+    tft.fillScreen(TFT_BLACK);
+    lastScreen = want;
+    // Whatever comes next has to repaint from scratch over the cleared panel.
+    lastDrawnCount = -1;
+    lastDrawnSet   = -1;
+    if (want == ScreenNormal) {
+      drawStaticLayout();
+    } else if (want == ScreenDone) {
+      drawDoneScreen();
+    }
+  }
+
+  if (want == ScreenSending) {
+    return;   // the animation task owns the panel until the POST returns
+  }
+  if (want == ScreenDone) {
+    return;   // static until it expires
+  }
+
+  if (repCount == lastDrawnCount && setNumber == lastDrawnSet
+      && setState == lastDrawnState) {
     return;
   }
   lastDrawnCount = repCount;
+  lastDrawnSet   = setNumber;
   lastDrawnState = setState;
-  lastDrawnPct = pct;
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextPadding(120);
   tft.drawNumber(repCount, 6, 24, 7);
+
+  // Set counter, top right, balancing the REPS label on the left.
+  char setLabel[12];
+  snprintf(setLabel, sizeof(setLabel), "SET %d", setNumber);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextPadding(70);
+  tft.drawString(setLabel, displayW - 6, 2, 2);
+  tft.setTextDatum(TL_DATUM);
 
   const char* status = "IDLE";
   if (setState == InProgress)        status = "RECORDING";
@@ -734,11 +855,4 @@ void updateDisplay() {
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.setTextPadding(displayW - 12);
   tft.drawString(status, 6, 110, 2);
-
-  // Progress bar inside the frame drawn by drawStaticLayout()
-  const int barW = displayW - 16;
-  tft.fillRect(8, 94, barW, 8, TFT_BLACK);
-  if (pct > 0) {
-    tft.fillRect(8, 94, barW * pct / 100, 8, TFT_GREEN);
-  }
 }

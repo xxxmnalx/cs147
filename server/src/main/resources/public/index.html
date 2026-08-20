@@ -198,6 +198,12 @@
 
 const SAMPLE_BYTES = 5;
 
+/* Resolved against the page URL rather than the site root, so the same file
+   works served straight off the server and proxied under a path prefix such
+   as /project/stacksense/. Requires the page URL to end in a slash, which the
+   proxy in front of it is responsible for. */
+const API = new URL('api/', document.baseURI).pathname;
+
 /* ------------------------------------------------------------------ i18n */
 const STR = {
   zh: {
@@ -212,6 +218,7 @@ const STR = {
     copy:'复制分析 Prompt', copied:'Prompt 已复制到剪贴板',
     copyFail:'复制失败，请手动选择文本',
     confirmDel:n=>`确定删除 ${n} 组数据？此操作不可撤销。`,
+    askKey:'输入删除密码', badKey:'密码错误', noKey:'服务器未配置删除密码',
     deleted:n=>`已删除 ${n} 组`, delFail:'删除失败',
     unitMm:'mm', unitMg:'mg', unitPct:'%',
   },
@@ -227,6 +234,7 @@ const STR = {
     copy:'Copy analysis prompt', copied:'Prompt copied to clipboard',
     copyFail:'Copy failed — select the text manually',
     confirmDel:n=>`Delete ${n} set${n===1?'':'s'}? This cannot be undone.`,
+    askKey:'Enter delete password', badKey:'Wrong password', noKey:'No delete password configured on the server',
     deleted:n=>`Deleted ${n}`, delFail:'Delete failed',
     unitMm:'mm', unitMg:'mg', unitPct:'%',
   }
@@ -463,7 +471,7 @@ function paintDeleteBtn() {
 /* ------------------------------------------------------------- data load */
 async function loadSets(keepSelection) {
   let res;
-  try { res = await fetch('/api/sets'); }
+  try { res = await fetch(API + 'sets'); }
   catch (e) { setStatus(T().noConn, false); return; }
 
   if (res.status === 503) {
@@ -539,7 +547,7 @@ async function select(id) {
 
   let buf;
   try {
-    const r = await fetch('/api/sets/' + id + '/waveform');
+    const r = await fetch(API + 'sets/' + id + '/waveform');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     buf = await r.arrayBuffer();
   } catch (e) {
@@ -617,13 +625,35 @@ async function deletePicked() {
   if (!ids.length) return;
   if (!confirm(T().confirmDel(ids.length))) return;
 
-  let gone = 0;
+  /* Remembered so a multi-select delete asks once, not once per row. Cleared
+     again the moment the server rejects it. */
+  let key = localStorage.getItem('ss.key');
+  if (!key) {
+    key = prompt(T().askKey);
+    if (!key) return;
+  }
+
+  let gone = 0, denied = false, disabled = false;
   for (const id of ids) {
     try {
-      const r = await fetch('/api/sets/' + id, { method: 'DELETE' });
-      if (r.ok) gone++;
-    } catch (e) { /* counted as failure below */ }
+      const r = await fetch(API + 'sets/' + id, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Key': key }
+      });
+      if (r.ok) { gone++; continue; }
+      if (r.status === 401) { denied = true; break; }
+      if (r.status === 503) { disabled = true; break; }
+    } catch (e) { /* counted as a failure below */ }
   }
+
+  if (denied) {
+    localStorage.removeItem('ss.key');
+    toast(T().badKey);
+    return;
+  }
+  if (disabled) { toast(T().noKey); return; }
+
+  localStorage.setItem('ss.key', key);
   picked.clear();
   toast(gone === ids.length ? T().deleted(gone) : `${T().delFail} (${gone}/${ids.length})`);
   await loadSets(true);
