@@ -146,6 +146,38 @@ public final class Db {
         return out;
     }
 
+    /** One set's metadata, or null when the id is unknown. */
+    public static SetRow getSet(long id) {
+        if (pool == null) {
+            return null;
+        }
+        String sql = "SELECT id, set_number, reps, baseline_mm, resting_g, sample_count, "
+                + "duration_ms, checksum, received_at FROM sets WHERE id = ?";
+        try (Connection c = pool.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                SetRow r = new SetRow();
+                r.id          = rs.getLong("id");
+                r.setNumber   = rs.getInt("set_number");
+                r.reps        = rs.getInt("reps");
+                r.baselineMm  = rs.getInt("baseline_mm");
+                r.restingG    = rs.getDouble("resting_g");
+                r.sampleCount = rs.getInt("sample_count");
+                r.durationMs  = rs.getInt("duration_ms");
+                r.checksum    = rs.getLong("checksum");
+                r.receivedAt  = String.valueOf(rs.getTimestamp("received_at"));
+                return r;
+            }
+        } catch (SQLException e) {
+            log.error("getSet failed: {}", e.getMessage());
+            return null;
+        }
+    }
+
     /** Deletes one set. Returns false when the id was not present. */
     public static boolean deleteSet(long id) {
         if (pool == null) {

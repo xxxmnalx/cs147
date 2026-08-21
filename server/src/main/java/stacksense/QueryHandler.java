@@ -63,6 +63,28 @@ public final class QueryHandler {
         ctx.contentType("application/octet-stream").result(blob);
     }
 
+    /** GET /api/analysis/{id} — per-rep metrics derived from the stored waveform. */
+    public static void analysis(Context ctx) {
+        if (!Db.isReady()) {
+            ctx.status(503).json(err("database not available"));
+            return;
+        }
+        long id;
+        try {
+            id = Long.parseLong(ctx.pathParam("id"));
+        } catch (NumberFormatException e) {
+            ctx.status(400).json(err("id must be a number"));
+            return;
+        }
+        Db.SetRow row = Db.getSet(id);
+        byte[] blob = Db.waveform(id);
+        if (row == null || blob == null) {
+            ctx.status(404).json(err("no set with id " + id));
+            return;
+        }
+        ctx.json(Analysis.analyse(blob, row.reps));
+    }
+
     /**
      * DELETE /api/sets/{id}
      *

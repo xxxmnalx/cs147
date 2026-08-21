@@ -44,6 +44,7 @@ public final class Main {
         app.post("/api/upload", UploadHandler::handle);
         app.get("/api/sets", QueryHandler::list);
         app.get("/api/sets/{id}/waveform", QueryHandler::waveform);
+        app.get("/api/analysis/{id}", QueryHandler::analysis);
         app.delete("/api/sets/{id}", QueryHandler::remove);
 
         // 0.0.0.0 so the ESP32 and the EC2 security group can reach it, not just localhost.

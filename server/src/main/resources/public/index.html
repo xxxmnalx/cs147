@@ -140,6 +140,43 @@
     padding:.5rem .7rem; border-radius:3px; font-size:.76rem; overflow-x:auto;
   }
 
+  /* ---------- analysis ---------- */
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(8rem,1fr)); border-bottom:1px solid var(--rule-soft); }
+  .cards div { padding:.7rem .9rem; border-right:1px solid var(--rule-soft); }
+  .cards div:last-child { border-right:0; }
+  .cards dt {
+    font-family:var(--mono); font-size:.6rem; letter-spacing:.11em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .18rem;
+  }
+  .cards dd {
+    font-family:var(--mono); font-size:1.05rem; color:var(--ink); margin:0;
+    font-variant-numeric:tabular-nums;
+  }
+  .cards dd small { font-size:.62rem; color:var(--muted); margin-left:.15rem; }
+  .cards dd.good { color:var(--ok); }
+  .cards dd.warn { color:var(--bad); }
+
+  .tblwrap { overflow-x:auto; }
+  table.reps { width:100%; border-collapse:collapse; font-family:var(--mono); font-size:.78rem; }
+  table.reps th {
+    text-align:right; font-size:.6rem; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--muted); font-weight:500; padding:.55rem .6rem; white-space:nowrap;
+    border-bottom:1px solid var(--rule); background:var(--sunk); position:sticky; top:0;
+  }
+  table.reps th:first-child, table.reps td:first-child { text-align:left; }
+  table.reps td {
+    text-align:right; padding:.45rem .6rem; white-space:nowrap;
+    border-bottom:1px solid var(--rule-soft); color:var(--ink);
+    font-variant-numeric:tabular-nums;
+  }
+  table.reps tbody tr:hover { background:var(--sunk); }
+
+  .note {
+    font-family:var(--mono); font-size:.72rem; color:var(--bad);
+    padding:.6rem .9rem; border-bottom:1px solid var(--rule-soft);
+    background:var(--bad-soft);
+  }
+
   /* ---------- toast ---------- */
   #toast {
     position:fixed; left:50%; bottom:1.75rem; transform:translateX(-50%) translateY(1rem);
@@ -185,7 +222,13 @@
     </section>
 
     <section class="panel" id="detail">
-      <div class="cap"><span id="capWave"></span></div>
+      <div class="cap">
+        <span id="capWave"></span>
+        <div class="seg">
+          <button id="btnViewWave" type="button"></button>
+          <button id="btnViewAnal" type="button"></button>
+        </div>
+      </div>
       <div class="empty" id="detailBody"></div>
     </section>
   </div>
@@ -220,6 +263,13 @@ const STR = {
     confirmDel:n=>`确定删除 ${n} 组数据？此操作不可撤销。`,
     askKey:'输入删除密码', badKey:'密码错误', noKey:'服务器未配置删除密码',
     deleted:n=>`已删除 ${n} 组`, delFail:'删除失败',
+    tabWave:'波形', tabAnal:'分析',
+    sumDetected:'检出 reps', sumMeanRom:'平均 ROM', sumCv:'一致性', sumDecay:'ROM 衰减',
+    sumTempo:'平均节奏', sumRatio:'离心/向心',
+    colRep:'rep', colRom:'ROM', colCon:'向心', colEcc:'离心', colRatio:'离心/向心', colVel:'峰值速度',
+    fatigue:'每个 rep 的 ROM（虚线为均值）',
+    analFail:'分析失败', noReps:'未检出任何 rep',
+    vsDevice:n=>`设备计数 ${n}`,
     unitMm:'mm', unitMg:'mg', unitPct:'%',
   },
   en: {
@@ -236,6 +286,13 @@ const STR = {
     confirmDel:n=>`Delete ${n} set${n===1?'':'s'}? This cannot be undone.`,
     askKey:'Enter delete password', badKey:'Wrong password', noKey:'No delete password configured on the server',
     deleted:n=>`Deleted ${n}`, delFail:'Delete failed',
+    tabWave:'Waveform', tabAnal:'Analysis',
+    sumDetected:'Reps found', sumMeanRom:'Mean ROM', sumCv:'Consistency', sumDecay:'ROM decay',
+    sumTempo:'Mean tempo', sumRatio:'Ecc/con',
+    colRep:'rep', colRom:'ROM', colCon:'Concentric', colEcc:'Eccentric', colRatio:'Ecc/con', colVel:'Peak vel',
+    fatigue:'ROM per rep (dashed line is the mean)',
+    analFail:'Analysis failed', noReps:'No reps detected',
+    vsDevice:n=>`device counted ${n}`,
     unitMm:'mm', unitMg:'mg', unitPct:'%',
   }
 };
@@ -428,6 +485,8 @@ Be specific and cite the numbers. Say so plainly if the data is too coarse to su
 
 /* ----------------------------------------------------------------- state */
 let sets = [], current = null, decoded = null, picked = new Set();
+let view = localStorage.getItem('ss.view') || 'wave';   // 'wave' | 'anal'
+let analysis = null;   // cached per selected set
 
 const $ = id => document.getElementById(id);
 const $list = $('setList'), $detail = $('detail'), $body = $('detailBody');
@@ -458,7 +517,11 @@ function paintChrome() {
   $('btnZh').classList.toggle('on', lang === 'zh');
   $('btnEn').classList.toggle('on', lang === 'en');
   $('capSets').textContent = T().sets;
-  $('capWave').textContent = current ? `${T().wave} · #${current}` : T().wave;
+  $('capWave').textContent = current ? `#${current}` : '—';
+  $('btnViewWave').textContent = T().tabWave;
+  $('btnViewAnal').textContent = T().tabAnal;
+  $('btnViewWave').classList.toggle('on', view === 'wave');
+  $('btnViewAnal').classList.toggle('on', view === 'anal');
   paintDeleteBtn();
 }
 
@@ -543,7 +606,8 @@ async function select(id) {
 
   $body.className = 'empty';
   $body.textContent = T().loading;
-  $('capWave').textContent = `${T().wave} · #${id}`;
+  $('capWave').textContent = `#${id}`;
+  analysis = null;
 
   let buf;
   try {
@@ -563,6 +627,7 @@ async function select(id) {
 
 function renderDetail() {
   if (!decoded) return;
+  if (view === 'anal') { renderAnalysis(); return; }
   const s = decoded.meta, d = decoded;
 
   $body.className = '';
@@ -589,6 +654,114 @@ function renderDetail() {
 
   $('btnCopy').addEventListener('click', copyPrompt);
   renderCharts();
+}
+
+async function renderAnalysis() {
+  if (!decoded) return;
+  const id = decoded.meta.id;
+
+  if (!analysis) {
+    $body.className = 'empty';
+    $body.textContent = T().loading;
+    try {
+      const r = await fetch(API + 'analysis/' + id);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      analysis = await r.json();
+    } catch (e) {
+      $body.textContent = T().analFail + ': ' + e.message;
+      return;
+    }
+    if (view !== 'anal' || !decoded || decoded.meta.id !== id) return;   // switched away
+  }
+
+  const a = analysis;
+  if (!a.reps || !a.reps.length) {
+    $body.className = 'empty';
+    $body.textContent = (a.note || T().noReps);
+    return;
+  }
+
+  const drop = a.romDropPct;
+  const dropCls = drop === null || drop === undefined ? '' : (drop > 10 ? 'warn' : 'good');
+  const cvCls = a.romCvPct > 15 ? 'warn' : 'good';
+  const meanRatio = (a.reps.reduce((x, r) => x + r.eccentricRatio, 0) / a.reps.length).toFixed(2);
+
+  const rows = a.reps.map(r =>
+    `<tr><td>${r.index}</td><td>${r.romMm}</td><td>${r.concentricMs}</td>` +
+    `<td>${r.eccentricMs}</td><td>${r.eccentricRatio.toFixed(2)}</td>` +
+    `<td>${r.peakVelocityMmS}</td></tr>`).join('');
+
+  $body.className = '';
+  $body.innerHTML =
+    (a.note ? `<div class="note">${a.note}</div>` : '') +
+    `<dl class="cards">
+       <div><dt>${T().sumDetected}</dt><dd>${a.detectedReps}<small>/ ${T().vsDevice(a.deviceReps)}</small></dd></div>
+       <div><dt>${T().sumMeanRom}</dt><dd>${a.romMeanMm}<small>mm</small></dd></div>
+       <div><dt>${T().sumCv}</dt><dd class="${cvCls}">±${a.romStdDevMm}<small>mm · CV ${a.romCvPct}%</small></dd></div>
+       <div><dt>${T().sumDecay}</dt><dd class="${dropCls}">${drop > 0 ? '−' : '+'}${Math.abs(drop)}<small>%</small></dd></div>
+       <div><dt>${T().sumTempo}</dt><dd>${(a.tempoMeanMs / 1000).toFixed(2)}<small>s</small></dd></div>
+       <div><dt>${T().sumRatio}</dt><dd>${meanRatio}</dd></div>
+     </dl>
+     <div class="chart">
+       <h3><span class="swatch" style="background:${css('--range')}"></span>${T().fatigue}</h3>
+       <canvas id="cF"></canvas>
+     </div>
+     <div class="tblwrap">
+       <table class="reps">
+         <thead><tr>
+           <th>${T().colRep}</th><th>${T().colRom} mm</th><th>${T().colCon} ms</th>
+           <th>${T().colEcc} ms</th><th>${T().colRatio}</th><th>${T().colVel} mm/s</th>
+         </tr></thead>
+         <tbody>${rows}</tbody>
+       </table>
+     </div>`;
+
+  drawFatigue(a);
+}
+
+/* ROM per rep as bars, with the mean as a reference. A downward staircase is
+   the fatigue signature; a flat row of bars means the set held up. */
+function drawFatigue(a) {
+  const cv = document.getElementById('cF');
+  if (!cv) return;
+  const ratio = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, hgt = 150;
+  cv.width = w * ratio; cv.height = hgt * ratio;
+  cv.style.height = hgt + 'px';
+
+  const g = cv.getContext('2d');
+  g.setTransform(ratio, 0, 0, ratio, 0, 0);
+  g.clearRect(0, 0, w, hgt);
+
+  const padL = 44, padR = 12, padT = 10, padB = 22;
+  const pw = w - padL - padR, ph = hgt - padT - padB;
+  const roms = a.reps.map(r => r.romMm);
+  const hi = Math.max(...roms) * 1.1, lo = 0;
+  const Y = v => padT + (1 - (v - lo) / (hi - lo)) * ph;
+
+  g.strokeStyle = css('--rule-soft'); g.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const y = padT + (i / 3) * ph;
+    g.beginPath(); g.moveTo(padL, y); g.lineTo(padL + pw, y); g.stroke();
+  }
+
+  const slot = pw / roms.length, barW = Math.min(38, slot * 0.6);
+  g.fillStyle = css('--range');
+  roms.forEach((v, i) => {
+    const x = padL + slot * i + (slot - barW) / 2;
+    g.fillRect(x, Y(v), barW, padT + ph - Y(v));
+  });
+
+  g.strokeStyle = css('--accel'); g.setLineDash([3, 3]);
+  g.beginPath(); g.moveTo(padL, Y(a.romMeanMm)); g.lineTo(padL + pw, Y(a.romMeanMm)); g.stroke();
+  g.setLineDash([]);
+
+  g.fillStyle = css('--muted'); g.font = '10px ' + css('--mono');
+  g.textAlign = 'right';
+  g.fillText(Math.round(hi) + 'mm', padL - 6, padT + 8);
+  g.fillText('0', padL - 6, padT + ph);
+  g.textAlign = 'center';
+  roms.forEach((v, i) => g.fillText(String(i + 1), padL + slot * i + slot / 2, hgt - 6));
 }
 
 function renderCharts() {
@@ -673,13 +846,24 @@ function switchLang(l) {
   setStatus(T().stored(sets.length), true);
   if (decoded) renderDetail(); else { $body.textContent = T().pick; }
 }
+function switchView(v) {
+  view = v; localStorage.setItem('ss.view', v);
+  paintChrome();
+  if (decoded) renderDetail();
+}
+$('btnViewWave').addEventListener('click', () => switchView('wave'));
+$('btnViewAnal').addEventListener('click', () => switchView('anal'));
+
 $('btnZh').addEventListener('click', () => switchLang('zh'));
 $('btnEn').addEventListener('click', () => switchLang('en'));
 
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(renderCharts, 120);
+  resizeTimer = setTimeout(() => {
+    if (view === 'anal') { if (analysis) drawFatigue(analysis); }
+    else renderCharts();
+  }, 120);
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderCharts);
 
